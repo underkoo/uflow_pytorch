@@ -120,6 +120,7 @@ def compute_cost_volume(features1, features2, max_displacement):
             corr = torch.mean(prod, dim=1, keepdim=True)
             cost_list.append(corr)
     cost_volume = torch.cat(cost_list, dim=1)
+    print(cost_volume.shape, features1.shape)
     return cost_volume
 
 
