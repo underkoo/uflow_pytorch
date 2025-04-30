@@ -167,11 +167,12 @@ class UFlowLightningModule(pl.LightningModule):
         """훈련 단계"""
         # 데이터 추출
         if 'frames' in batch:
-            # frames에서 처음 세 프레임을 가져옴
-            # DataLoader는 리스트의 각 위치를 배치 차원으로 스택함
-            # [batch_size, C, H, W] 형태의 텐서가 됨
+            # frames는 [batch_size, seq_len, C, H, W] 형태
             frames = batch['frames']
-            img_t1, img_t2, img_t3 = frames
+            # 슬라이싱으로 각 프레임 추출
+            img_t1 = frames[:, 0]  # 첫 번째 프레임
+            img_t2 = frames[:, 1]  # 두 번째 프레임
+            img_t3 = frames[:, 2]  # 세 번째 프레임
         elif 'frame_tm1' in batch and 'frame_t' in batch and 'frame_tp1' in batch:
             # 별도의 키로 제공되는 경우
             img_t1 = batch['frame_tm1']
@@ -232,11 +233,12 @@ class UFlowLightningModule(pl.LightningModule):
         """검증 단계"""
         # 데이터 추출
         if 'frames' in batch:
-            # frames에서 처음 세 프레임을 가져옴
-            # DataLoader는 리스트의 각 위치를 배치 차원으로 스택함
-            # [batch_size, C, H, W] 형태의 텐서가 됨
+            # frames는 [batch_size, seq_len, C, H, W] 형태
             frames = batch['frames']
-            img_t1, img_t2, img_t3 = frames
+            # 슬라이싱으로 각 프레임 추출
+            img_t1 = frames[:, 0]  # 첫 번째 프레임
+            img_t2 = frames[:, 1]  # 두 번째 프레임
+            img_t3 = frames[:, 2]  # 세 번째 프레임
         elif 'frame_tm1' in batch and 'frame_t' in batch and 'frame_tp1' in batch:
             # 별도의 키로 제공되는 경우
             img_t1 = batch['frame_tm1']
