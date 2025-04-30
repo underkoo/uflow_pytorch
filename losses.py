@@ -413,15 +413,15 @@ class CensusLoss(nn.Module):
 
 class SmoothnessLoss(nn.Module):
     """
-    광학 흐름 평활화 손실
+    평활화 손실 (Smoothness Loss)
     
-    흐름 필드의 부드러움을 촉진
+    광학 흐름의 공간적 평활함을 촉진하는 손실 함수
     """
     def __init__(self, edge_aware=True, second_order=False):
         """
         Args:
-            edge_aware (bool): 이미지 에지를 고려한 평활화 사용
-            second_order (bool): 2차 도함수(라플라시안) 사용 여부
+            edge_aware (bool): 이미지 에지를 고려한 평활화 여부
+            second_order (bool): 이차 미분 사용 여부 (일차 미분보다 더 강한 평활화)
         """
         super(SmoothnessLoss, self).__init__()
         self.edge_aware = edge_aware
@@ -433,96 +433,100 @@ class SmoothnessLoss(nn.Module):
         
         Args:
             flow (torch.Tensor): 광학 흐름 [B, 2, H, W]
-            image (torch.Tensor, optional): 입력 이미지 [B, C, H, W], edge_aware=True일 때 사용
+            image (torch.Tensor, optional): 참조 이미지 [B, C, H, W], edge_aware=True일 때 사용
             valid_mask (torch.Tensor, optional): 유효 영역 마스크 [B, 1, H, W]
             
         Returns:
-            torch.Tensor: 평활화 손실 [B, 1, H, W]
+            torch.Tensor: 평활화 손실 (스칼라)
         """
-        # 흐름의 기울기 계산
-        flow_dx = self._gradient(flow, 'x')
-        flow_dy = self._gradient(flow, 'y')
-        
-        # 2차 평활화 (라플라시안)
-        if self.second_order:
-            flow_ddx = self._gradient(flow_dx, 'x')
-            flow_ddy = self._gradient(flow_dy, 'y')
-            flow_dxy = self._gradient(flow_dx, 'y')
+        # 일차 또는 이차 미분 계산
+        if not self.second_order:
+            # 일차 미분
+            flow_dx = self._gradient(flow, 'x')
+            flow_dy = self._gradient(flow, 'y')
             
-            # 기울기의 L1 노름 계산
-            smoothness = torch.abs(flow_ddx) + torch.abs(flow_ddy) + torch.abs(flow_dxy)
-        else:
-            # 기울기의 L1 노름 계산
-            smoothness = torch.abs(flow_dx) + torch.abs(flow_dy)
-        
-        # 채널 평균 계산
-        smoothness = torch.mean(smoothness, dim=1, keepdim=True)
-        
-        # 에지 인식 가중치 적용
-        if self.edge_aware and image is not None:
-            # 이미지 기울기 계산
-            image_dx = self._gradient(image, 'x')
-            image_dy = self._gradient(image, 'y')
-            
-            # 기울기의 L1 노름
-            image_dx_mag = torch.mean(torch.abs(image_dx), dim=1, keepdim=True)
-            image_dy_mag = torch.mean(torch.abs(image_dy), dim=1, keepdim=True)
-            
-            # 이미지 에지에서 가중치 감소
-            weights_x = torch.exp(-image_dx_mag)
-            weights_y = torch.exp(-image_dy_mag)
-            
-            # 에지 인식 평활화
-            if self.second_order:
-                smoothness = (
-                    torch.abs(flow_ddx) * weights_x + 
-                    torch.abs(flow_ddy) * weights_y + 
-                    torch.abs(flow_dxy) * weights_x * weights_y
-                )
-                smoothness = torch.mean(smoothness, dim=1, keepdim=True)
+            # 평활화 손실 계산
+            if self.edge_aware and image is not None:
+                # 이미지 그라디언트 계산
+                img_dx = self._gradient(image, 'x')
+                img_dy = self._gradient(image, 'y')
+                
+                # 이미지 에지 가중치
+                weights_x = torch.exp(-torch.mean(torch.abs(img_dx), dim=1, keepdim=True))
+                weights_y = torch.exp(-torch.mean(torch.abs(img_dy), dim=1, keepdim=True))
+                
+                # 에지 가중치 적용
+                weighted_flow_dx = flow_dx * weights_x
+                weighted_flow_dy = flow_dy * weights_y
+                
+                loss = torch.mean(torch.abs(weighted_flow_dx)) + torch.mean(torch.abs(weighted_flow_dy))
             else:
-                smoothness_x = torch.abs(flow_dx) * weights_x
-                smoothness_y = torch.abs(flow_dy) * weights_y
-                smoothness = torch.mean(smoothness_x + smoothness_y, dim=1, keepdim=True)
-        
-        # 마스크 적용
-        if valid_mask is not None:
-            smoothness = smoothness * valid_mask
+                # 기본 평활화 손실
+                loss = torch.mean(torch.abs(flow_dx)) + torch.mean(torch.abs(flow_dy))
+        else:
+            # 이차 미분 (라플라시안)
+            flow_lap = self._gradient(self._gradient(flow, 'x'), 'x') + self._gradient(self._gradient(flow, 'y'), 'y')
             
-        return smoothness
+            # 평활화 손실 계산
+            if self.edge_aware and image is not None:
+                # 이미지 라플라시안
+                img_lap = self._gradient(self._gradient(image, 'x'), 'x') + self._gradient(self._gradient(image, 'y'), 'y')
+                
+                # 이미지 에지 가중치
+                weights = torch.exp(-torch.mean(torch.abs(img_lap), dim=1, keepdim=True))
+                
+                # 에지 가중치 적용
+                weighted_flow_lap = flow_lap * weights
+                
+                loss = torch.mean(torch.abs(weighted_flow_lap))
+            else:
+                # 기본 이차 평활화 손실
+                loss = torch.mean(torch.abs(flow_lap))
+        
+        # 유효 마스크 적용 (선택적)
+        if valid_mask is not None:
+            valid_pixels = torch.sum(valid_mask) + 1e-8
+            loss = torch.sum(loss * valid_mask) / valid_pixels
+        
+        return loss
     
     def _gradient(self, tensor, direction):
         """
-        텐서의 기울기 계산
+        텐서의 공간 그라디언트 계산
         
         Args:
-            tensor (torch.Tensor): 입력 텐서 [B, C, H, W]
-            direction (str): 기울기 방향 ('x' 또는 'y')
+            tensor (torch.Tensor): 그라디언트를 계산할 텐서 [B, C, H, W]
+            direction (str): 그라디언트 방향 ('x' 또는 'y')
             
         Returns:
-            torch.Tensor: 기울기 [B, C, H, W]
+            torch.Tensor: 그라디언트 [B, C, H, W]
         """
         B, C, H, W = tensor.shape
         
         if direction == 'x':
-            # x 방향 기울기 (패딩 사용)
-            tensor_pad = F.pad(tensor, (0, 1, 0, 0), mode='replicate')
-            gradient = tensor_pad[:, :, :, 1:] - tensor_pad[:, :, :, :-1]
+            # x 방향 그라디언트
+            tensor_pad = F.pad(tensor, (1, 1, 0, 0), mode='replicate')
+            grad = tensor_pad[:, :, :, 2:] - tensor_pad[:, :, :, :-2]
+            grad = grad / 2.0
         elif direction == 'y':
-            # y 방향 기울기 (패딩 사용)
-            tensor_pad = F.pad(tensor, (0, 0, 0, 1), mode='replicate')
-            gradient = tensor_pad[:, :, 1:, :] - tensor_pad[:, :, :-1, :]
+            # y 방향 그라디언트
+            tensor_pad = F.pad(tensor, (0, 0, 1, 1), mode='replicate')
+            grad = tensor_pad[:, :, 2:, :] - tensor_pad[:, :, :-2, :]
+            grad = grad / 2.0
         else:
-            raise ValueError(f"Unknown gradient direction: {direction}")
-            
-        return gradient
+            raise ValueError(f"알 수 없는 그라디언트 방향: {direction}")
+        
+        return grad
 
 
 class UFlowLoss(nn.Module):
     """
-    UFlow 모델의 전체 손실 함수
+    UFlow 손실 함수
     
-    여러 손실 함수를 결합
+    논문에서 설명된 다양한 손실 함수들의 조합
+    - Photometric Loss (L1 + SSIM)
+    - Census Loss (지역적 패턴 유지)
+    - Smoothness Loss (흐름 필드의 부드러움)
     """
     def __init__(self,
                  photometric_weight=1.0,
@@ -542,13 +546,13 @@ class UFlowLoss(nn.Module):
             photometric_weight (float): Photometric 손실 가중치
             census_weight (float): Census 손실 가중치
             smoothness_weight (float): 평활화 손실 가중치
-            ssim_weight (float): SSIM 손실 가중치
+            ssim_weight (float): Photometric 손실 내에서 SSIM 비중
             window_size (int): SSIM 계산에 사용할 윈도우 크기
             occlusion_method (str): 가려짐 탐지 방법
             use_occlusion (bool): 가려짐 마스크 사용 여부
             use_valid_mask (bool): 유효 영역 마스크 사용 여부
-            second_order_smoothness (bool): 2차 평활화 사용 여부
-            edge_aware_smoothness (bool): 에지 인식 평활화 사용 여부
+            second_order_smoothness (bool): 2차 도함수 기반 평활화 사용 여부
+            edge_aware_smoothness (bool): 에지 인식 평활화 여부
             stop_gradient (bool): 역전파 중지 플래그
             bidirectional (bool): 양방향 손실 계산 여부
         """
@@ -732,156 +736,6 @@ class UFlowLoss(nn.Module):
         return utils.warp_image(img, flow)
 
 
-class SequenceLoss(nn.Module):
-    """
-    시퀀스 기반 손실 (Sequence Loss)
-    
-    연속 프레임에서의 시간적 일관성을 강제하는 손실 함수
-    t1→t2 흐름과 t2→t3 흐름을 조합하여 얻은 t1→t3 합성 흐름이
-    직접 계산된 t1→t3 흐름과 일치해야 한다는 제약 조건 적용
-    """
-    def __init__(self, 
-                 alpha=0.01, 
-                 use_occlusion_mask=True, 
-                 use_valid_mask=True,
-                 stop_gradient=True,
-                 distance='robust_l1',
-                 epsilon=0.01):
-        """
-        Args:
-            alpha (float): 시퀀스 손실 가중치
-            use_occlusion_mask (bool): 가려짐 마스크 사용 여부
-            use_valid_mask (bool): 유효 영역 마스크 사용 여부
-            stop_gradient (bool): 그래디언트 흐름 제어 사용 여부
-            distance (str): 거리 측정 방식 ('l1', 'l2', 'robust_l1')
-            epsilon (float): robust L1 손실의 안정성 파라미터
-        """
-        super(SequenceLoss, self).__init__()
-        
-        self.alpha = alpha
-        self.use_occlusion_mask = use_occlusion_mask
-        self.use_valid_mask = use_valid_mask
-        self.stop_gradient = stop_gradient
-        self.distance = distance
-        self.epsilon = epsilon
-        
-        self.occlusion_mask = OcclusionMask(method='forward_backward')
-    
-    def forward(self, 
-                flow_t1_t2, 
-                flow_t2_t3, 
-                flow_t1_t3, 
-                flow_t3_t1=None, 
-                valid_mask=None):
-        """
-        시퀀스 손실 계산
-        
-        Args:
-            flow_t1_t2 (torch.Tensor): t1→t2 방향 흐름 [B, 2, H, W]
-            flow_t2_t3 (torch.Tensor): t2→t3 방향 흐름 [B, 2, H, W]
-            flow_t1_t3 (torch.Tensor): t1→t3 방향 흐름 (직접 계산) [B, 2, H, W]
-            flow_t3_t1 (torch.Tensor, optional): t3→t1 방향 흐름 (가려짐 마스크 계산용) [B, 2, H, W]
-            valid_mask (torch.Tensor, optional): 유효 영역 마스크
-            
-        Returns:
-            dict: 시퀀스 손실 값들
-                - 'sequence_loss': 전체 시퀀스 손실
-                - 'flow_consistency_loss': 흐름 일관성 손실
-                - 'occlusion_mask': 가려짐 마스크 (있는 경우)
-        """
-        # 유효 마스크 확인
-        if valid_mask is None and self.use_valid_mask:
-            # 기본 유효 마스크는 모든 픽셀이 유효
-            valid_mask = torch.ones((flow_t1_t2.shape[0], 1, flow_t1_t2.shape[2], flow_t1_t2.shape[3]), device=flow_t1_t2.device)
-            
-            # stop-gradient 적용
-            if self.stop_gradient:
-                valid_mask = valid_mask.detach()
-        
-        # 가려짐 마스크 계산
-        occlusion_mask = None
-        if self.use_occlusion_mask and flow_t3_t1 is not None:
-            occlusion_mask = self.occlusion_mask(flow_t1_t3, flow_t3_t1)
-            
-            # stop-gradient 적용 - occlusion 마스크의 그래디언트가 네트워크에 영향을 미치지 않도록 함
-            if self.stop_gradient:
-                occlusion_mask = occlusion_mask.detach()
-        
-        # flow_t1_t2를 사용하여 flow_t2_t3 와핑
-        flow_t2_t3_warped = self._warp_flow(flow_t2_t3, flow_t1_t2)
-        
-        # stop-gradient 적용
-        if self.stop_gradient:
-            flow_t2_t3_warped = flow_t2_t3_warped.detach()
-        
-        # 합성 흐름 계산: flow_t1_t2 + warped_flow_t2_t3
-        flow_t1_t3_composed = flow_t1_t2 + flow_t2_t3_warped
-        
-        # 직접 계산된 흐름과 합성 흐름 간의 거리 계산
-        if self.distance == 'l1':
-            # L1 거리
-            flow_diff = torch.abs(flow_t1_t3 - flow_t1_t3_composed)
-            flow_dist = torch.sum(flow_diff, dim=1, keepdim=True)  # 채널 축으로 합산
-        elif self.distance == 'l2':
-            # L2 거리
-            flow_diff = flow_t1_t3 - flow_t1_t3_composed
-            flow_dist = torch.sqrt(torch.sum(flow_diff ** 2, dim=1, keepdim=True))
-        else:
-            # robust L1 (Charbonnier)
-            flow_diff = flow_t1_t3 - flow_t1_t3_composed
-            flow_dist = torch.sqrt(torch.sum(flow_diff ** 2 + self.epsilon ** 2, dim=1, keepdim=True))
-        
-        # 마스크 적용
-        if self.use_occlusion_mask and occlusion_mask is not None:
-            flow_dist = flow_dist * occlusion_mask
-        
-        if valid_mask is not None:
-            flow_dist = flow_dist * valid_mask
-        
-        # 손실 평균 계산
-        if valid_mask is not None and torch.sum(valid_mask) > 0:
-            weights = torch.ones_like(valid_mask)
-            if self.stop_gradient:
-                weights = weights.detach()
-            
-            weighted_mask = weights * valid_mask
-            if self.use_occlusion_mask and occlusion_mask is not None:
-                weighted_mask = weighted_mask * occlusion_mask
-            
-            norm_factor = torch.sum(weighted_mask) + 1e-8
-            flow_consistency_loss = torch.sum(flow_dist * weighted_mask) / norm_factor
-        else:
-            flow_consistency_loss = torch.mean(flow_dist)
-        
-        # 총 손실 (가중치 적용)
-        total_loss = self.alpha * flow_consistency_loss
-        
-        # 결과 딕셔너리 생성
-        loss_dict = {
-            'sequence_loss': total_loss,
-            'flow_consistency_loss': flow_consistency_loss
-        }
-        
-        if occlusion_mask is not None:
-            loss_dict['occlusion_mask'] = occlusion_mask
-        
-        return loss_dict
-    
-    def _warp_flow(self, flow, ref_flow):
-        """
-        참조 흐름을 따라 흐름 필드를 와핑
-        
-        Args:
-            flow (torch.Tensor): 와핑할 흐름 [B, 2, H, W]
-            ref_flow (torch.Tensor): 참조 흐름 [B, 2, H, W]
-            
-        Returns:
-            torch.Tensor: 와핑된 흐름 [B, 2, H, W]
-        """
-        # utils.py의 warp_flow 함수 사용
-        return utils.warp_flow(flow, ref_flow)
-
-
 class MultiScaleUFlowLoss(nn.Module):
     """
     다중 스케일 UFlow 손실 함수
@@ -912,7 +766,7 @@ class MultiScaleUFlowLoss(nn.Module):
             edge_weighting (bool): 에지 인식 평활화 사용 여부
             stop_gradient (bool): 역전파 중지 플래그
             bidirectional (bool): 양방향 손실 계산 여부
-            scale_weights (list): 각 스케일에 대한 가중치 (None이면 자동 계산)
+            scale_weights (list, optional): 각 스케일에 대한 가중치 리스트
         """
         super(MultiScaleUFlowLoss, self).__init__()
         
@@ -1088,164 +942,6 @@ class MultiScaleUFlowLoss(nn.Module):
         return all_losses
 
 
-class FullSequentialLoss(nn.Module):
-    """
-    UFlow의 전체 손실 함수 (다중 스케일 + 시퀀스 손실)
-    
-    다중 스케일 손실과 시퀀스 손실을 결합
-    """
-    def __init__(
-        self,
-        photometric_weight=1.0,
-        census_weight=1.0,
-        smoothness_weight=1.0,
-        sequence_weight=0.2,
-        ssim_weight=0.85,
-        window_size=7,
-        occlusion_method='forward_backward',
-        use_occlusion=True,
-        use_valid_mask=True,
-        second_order_smoothness=False,
-        edge_aware_smoothness=True,
-        stop_gradient=True,
-        bidirectional=False,
-        scale_weights=None
-    ):
-        """
-        Args:
-            photometric_weight (float): Photometric 손실 가중치
-            census_weight (float): Census 손실 가중치
-            smoothness_weight (float): 평활화 손실 가중치
-            sequence_weight (float): 시퀀스 손실 가중치
-            ssim_weight (float): SSIM 손실 가중치
-            window_size (int): SSIM 계산에 사용할 윈도우 크기
-            occlusion_method (str): 가려짐 탐지 방법
-            use_occlusion (bool): 가려짐 마스크 사용 여부
-            use_valid_mask (bool): 유효 영역 마스크 사용 여부
-            second_order_smoothness (bool): 2차 평활화 사용 여부
-            edge_aware_smoothness (bool): 에지 인식 평활화 사용 여부
-            stop_gradient (bool): 그래디언트 흐름 제어 사용 여부
-            bidirectional (bool): 양방향 손실 계산 여부
-            scale_weights (list, optional): 각 스케일에 대한 가중치 리스트
-        """
-        super(FullSequentialLoss, self).__init__()
-        
-        # 다중 스케일 손실
-        self.multiscale_loss = MultiScaleUFlowLoss(
-            photometric_weight=photometric_weight,
-            census_weight=census_weight,
-            smoothness_weight=smoothness_weight,
-            ssim_weight=ssim_weight,
-            window_size=window_size,
-            occlusion_method=occlusion_method,
-            edge_weighting=edge_aware_smoothness,
-            stop_gradient=stop_gradient,
-            bidirectional=bidirectional,
-            scale_weights=scale_weights
-        )
-        
-        # 시퀀스 손실
-        self.sequence_loss = SequenceLoss(
-            alpha=1.0,  # 여기서는 1.0으로 설정하고 아래에서 sequence_weight로 조정
-            use_occlusion_mask=use_occlusion,
-            use_valid_mask=use_valid_mask,
-            stop_gradient=stop_gradient,
-            distance='robust_l1'
-        )
-        
-        # 가중치
-        self.sequence_weight = sequence_weight
-    
-    def forward(self, 
-                images, 
-                flow_pyramids,
-                flow_t1_t3=None, 
-                flow_t3_t1=None, 
-                valid_mask=None):
-        """
-        전체 손실 계산
-        
-        Args:
-            images (list): 연속 3개 이미지 리스트 [img_t1, img_t2, img_t3]
-            flow_pyramids (list): 방향별 흐름 피라미드 리스트 [t1->t2, t2->t3, t2->t1, t3->t2]
-            flow_t1_t3 (torch.Tensor, optional): t1→t3 방향 흐름 (직접 계산)
-            flow_t3_t1 (torch.Tensor, optional): t3→t1 방향 흐름 (직접 계산)
-            valid_mask (torch.Tensor, optional): 유효 영역 마스크
-            
-        Returns:
-            dict: 각 스케일 및 손실 구성 요소에 대한 총 손실 값
-        """
-        if len(images) < 3:
-            raise ValueError("시퀀스 손실 계산을 위해 최소 3개의 연속 이미지가 필요합니다.")
-        
-        img_t1, img_t2, img_t3 = images[0], images[1], images[2]
-        
-        if len(flow_pyramids) < 2:
-            raise ValueError("시퀀스 손실 계산을 위해 최소 t1→t2, t2→t3 흐름 피라미드가 필요합니다.")
-        
-        flow_pyramids_t1_t2 = flow_pyramids[0]
-        flow_pyramids_t2_t3 = flow_pyramids[1]
-        
-        flow_pyramids_t2_t1 = None
-        flow_pyramids_t3_t2 = None
-        
-        if len(flow_pyramids) >= 4:
-            flow_pyramids_t2_t1 = flow_pyramids[2]
-            flow_pyramids_t3_t2 = flow_pyramids[3]
-        
-        # 다중 스케일 손실 계산 (t1→t2)
-        multiscale_losses_t1_t2 = self.multiscale_loss(
-            img_t1, img_t2, flow_pyramids_t1_t2, flow_pyramids_t2_t1, valid_mask
-        )
-        
-        # 다중 스케일 손실 계산 (t2→t3)
-        multiscale_losses_t2_t3 = self.multiscale_loss(
-            img_t2, img_t3, flow_pyramids_t2_t3, flow_pyramids_t3_t2, valid_mask
-        )
-        
-        # 다중 스케일 손실 평균
-        multiscale_total_loss = (
-            multiscale_losses_t1_t2['total_loss'] + 
-            multiscale_losses_t2_t3['total_loss']
-        ) / 2.0
-        
-        # t1→t3 흐름이 제공되지 않은 경우, 시퀀스 손실은 계산하지 않음
-        sequence_total_loss = 0.0
-        
-        if flow_t1_t3 is not None:
-            # 가장 높은 해상도의 흐름 추출
-            flow_t1_t2 = flow_pyramids_t1_t2[0]
-            flow_t2_t3 = flow_pyramids_t2_t3[0]
-            
-            # 시퀀스 손실 계산
-            sequence_losses = self.sequence_loss(
-                flow_t1_t2, flow_t2_t3, flow_t1_t3, flow_t3_t1, valid_mask
-            )
-            
-            sequence_total_loss = sequence_losses['sequence_loss']
-        
-        # 총 손실 계산
-        total_loss = multiscale_total_loss + self.sequence_weight * sequence_total_loss
-        
-        # 결과 딕셔너리 생성
-        loss_dict = {
-            'total_loss': total_loss,
-            'multiscale_loss': multiscale_total_loss,
-            'sequence_loss': sequence_total_loss * self.sequence_weight
-        }
-        
-        # 다중 스케일 손실 결과 추가
-        for key, value in multiscale_losses_t1_t2.items():
-            if key != 'total_loss' and isinstance(value, torch.Tensor) and value.numel() == 1:
-                loss_dict[f't1_t2_{key}'] = value
-        
-        for key, value in multiscale_losses_t2_t3.items():
-            if key != 'total_loss' and isinstance(value, torch.Tensor) and value.numel() == 1:
-                loss_dict[f't2_t3_{key}'] = value
-        
-        return loss_dict
-
-
 # 테스트 코드
 if __name__ == "__main__":
     # 테스트 데이터 생성
@@ -1257,79 +953,46 @@ if __name__ == "__main__":
     # 이미지와 다중 스케일 흐름 피라미드 생성
     img1 = torch.rand(batch_size, channels, height, width)
     img2 = torch.rand(batch_size, channels, height, width)
-    img3 = torch.rand(batch_size, channels, height, width)
     
-    # 다양한 해상도의 흐름 피라미드 생성 (4개 레벨)
-    flow_pyramids_t1_t2 = []
-    flow_pyramids_t2_t3 = []
-    flow_pyramids_t2_t1 = []
-    flow_pyramids_t3_t2 = []
+    # 다양한 해상도의 흐름 피라미드 생성 (2개 레벨)
+    flow_pyramids_forward = []
+    flow_pyramids_backward = []
     
     # 레벨 0: 원본 크기 (256x256)
-    flow_pyramids_t1_t2.append(torch.randn(batch_size, 2, height, width) * 5.0)
-    flow_pyramids_t2_t3.append(torch.randn(batch_size, 2, height, width) * 5.0)
-    flow_pyramids_t2_t1.append(torch.randn(batch_size, 2, height, width) * 5.0)
-    flow_pyramids_t3_t2.append(torch.randn(batch_size, 2, height, width) * 5.0)
+    flow_pyramids_forward.append(torch.randn(batch_size, 2, height, width) * 5.0)
+    flow_pyramids_backward.append(torch.randn(batch_size, 2, height, width) * 5.0)
     
     # 레벨 1: 원본 크기 1/2 (128x128)
-    flow_pyramids_t1_t2.append(torch.randn(batch_size, 2, height//2, width//2) * 2.5)
-    flow_pyramids_t2_t3.append(torch.randn(batch_size, 2, height//2, width//2) * 2.5)
-    flow_pyramids_t2_t1.append(torch.randn(batch_size, 2, height//2, width//2) * 2.5)
-    flow_pyramids_t3_t2.append(torch.randn(batch_size, 2, height//2, width//2) * 2.5)
-    
-    # t1→t3, t3→t1 직접 흐름 (원본 크기)
-    flow_t1_t3 = torch.randn(batch_size, 2, height, width) * 8.0
-    flow_t3_t1 = torch.randn(batch_size, 2, height, width) * 8.0
+    flow_pyramids_forward.append(torch.randn(batch_size, 2, height//2, width//2) * 2.5)
+    flow_pyramids_backward.append(torch.randn(batch_size, 2, height//2, width//2) * 2.5)
     
     # GPU 사용 가능한 경우 데이터 이동
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     img1 = img1.to(device)
     img2 = img2.to(device)
-    img3 = img3.to(device)
-    flow_pyramids_t1_t2 = [flow.to(device) for flow in flow_pyramids_t1_t2]
-    flow_pyramids_t2_t3 = [flow.to(device) for flow in flow_pyramids_t2_t3]
-    flow_pyramids_t2_t1 = [flow.to(device) for flow in flow_pyramids_t2_t1]
-    flow_pyramids_t3_t2 = [flow.to(device) for flow in flow_pyramids_t3_t2]
-    flow_t1_t3 = flow_t1_t3.to(device)
-    flow_t3_t1 = flow_t3_t1.to(device)
+    flow_pyramids_forward = [flow.to(device) for flow in flow_pyramids_forward]
+    flow_pyramids_backward = [flow.to(device) for flow in flow_pyramids_backward]
     
-    print("\n1. 시퀀스 손실 테스트")
-    sequence_loss = SequenceLoss(alpha=0.2, stop_gradient=True)
-    sequence_loss = sequence_loss.to(device)
+    print("\n" + "-"*60)
+    print("다중 스케일 손실 테스트")
+    print("-"*60)
     
-    losses_seq = sequence_loss(
-        flow_pyramids_t1_t2[0],  # 가장 높은 해상도의 t1→t2 흐름
-        flow_pyramids_t2_t3[0],  # 가장 높은 해상도의 t2→t3 흐름
-        flow_t1_t3,              # 직접 계산된 t1→t3 흐름
-        flow_t3_t1               # 직접 계산된 t3→t1 흐름
-    )
-    
-    print("시퀀스 손실 결과:")
-    for key, value in losses_seq.items():
-        if isinstance(value, torch.Tensor) and value.numel() == 1:
-            print(f"  {key}: {value.item():.6f}")
-    
-    print("\n2. 전체 시퀀셜 손실 테스트")
-    full_loss = FullSequentialLoss(
+    multiscale_loss = MultiScaleUFlowLoss(
         photometric_weight=1.0,
         census_weight=1.0,
         smoothness_weight=0.1,
-        sequence_weight=0.2,
         stop_gradient=True,
-        bidirectional=False
+        bidirectional=True
     )
-    full_loss = full_loss.to(device)
+    multiscale_loss = multiscale_loss.to(device)
     
-    losses_full = full_loss(
-        [img1, img2, img3],
-        [flow_pyramids_t1_t2, flow_pyramids_t2_t3, flow_pyramids_t2_t1, flow_pyramids_t3_t2],
-        flow_t1_t3,
-        flow_t3_t1
-    )
+    losses_ms = multiscale_loss(img1, img2, flow_pyramids_forward, flow_pyramids_backward)
     
-    print("전체 시퀀셜 손실 결과:")
-    for key, value in sorted(losses_full.items()):
+    print("다중 스케일 손실 결과:")
+    for key, value in losses_ms.items():
         if isinstance(value, torch.Tensor) and value.numel() == 1:
             print(f"  {key}: {value.item():.6f}")
     
-    print("\n테스트 성공!") 
+    print("\n" + "-"*60)
+    print("테스트 성공!")
+    print("-"*60) 

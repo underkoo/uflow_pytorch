@@ -160,145 +160,129 @@ def warp_features(features, flow, mode='bilinear'):
     return warped_features
 
 
-def compute_range_map(flow, downsampling_factor=1, reduce_downsampling_bias=True, resize_output=False):
+def compute_range_map(flow, downsampling_factor=1, reduce_downsampling_bias=True, resize_output=True):
     """
-    광학 흐름의 범위 맵 계산 (얼마나 많은 픽셀이 특정 위치로 흐르는지)
+    광학 흐름에서 범위 맵 계산 (각 대상 픽셀이 소스 픽셀에 의해 얼마나 잘 커버되는지)
     
     Args:
         flow (torch.Tensor): 광학 흐름 [B, 2, H, W]
         downsampling_factor (int): 다운샘플링 비율
         reduce_downsampling_bias (bool): 다운샘플링 편향 감소 여부
-        resize_output (bool): 출력을 원본 크기로 리사이즈할지 여부
+        resize_output (bool): 출력을 원본 크기로 조정할지 여부
         
     Returns:
-        torch.Tensor: 범위 맵 [B, 1, H, W]
+        torch.Tensor: 범위 맵 [B, 1, H, W], 값이 클수록 해당 픽셀의 커버리지가 높음
     """
-    B, _, H, W = flow.shape
     device = flow.device
-    input_height, input_width = H, W
+    batch_size, _, height, width = flow.shape
     
-    # 다운샘플링된 크기 계산
-    output_height = H // downsampling_factor
-    output_width = W // downsampling_factor
-    
-    # Flow 다운샘플링
     if downsampling_factor > 1:
-        if reduce_downsampling_bias:
-            # 패딩 계산
-            p = downsampling_factor // 2
-            padded_flow = F.pad(flow, (p, p, p, p), mode='replicate')
-            
-            # 패딩된 flow를 다운샘플링
-            flow_small = F.interpolate(
-                padded_flow, 
-                size=(output_height + 2*p, output_width + 2*p), 
-                mode='bilinear', 
-                align_corners=False
-            )
-            
-            # 스케일 조정
-            flow_small = flow_small / downsampling_factor
-            
-            # 패딩 제거
-            flow_small = flow_small[:, :, p:-p, p:-p]
-        else:
-            # 단순 다운샘플링
-            flow_small = F.interpolate(
-                flow, 
-                size=(output_height, output_width), 
-                mode='bilinear', 
-                align_corners=False
-            )
-            flow_small = flow_small / downsampling_factor
+        # 흐름 다운샘플링
+        small_height = height // downsampling_factor
+        small_width = width // downsampling_factor
+        
+        # 다운샘플링 전 흐름 조정
+        flow_small = F.interpolate(
+            flow, 
+            size=(small_height, small_width), 
+            mode='bilinear', 
+            align_corners=False
+        ) / downsampling_factor
+        
+        height, width = small_height, small_width
     else:
         flow_small = flow
     
-    # 각 배치에 대해 범위 맵 계산
-    range_maps = []
-    
-    for b in range(B):
-        # 가중치가 분산될 카운트 이미지 초기화
-        count_image = torch.zeros((1, output_height, output_width), device=device)
-        
-        # 그리드 좌표 생성
-        y_grid, x_grid = torch.meshgrid(
-            torch.arange(output_height, device=device),
-            torch.arange(output_width, device=device),
+    # 타겟 자리표 생성 (정규화된 좌표계)
+    # torch 1.10 이상에서는 indexing='ij' 인자가 필요함
+    try:
+        y_t, x_t = torch.meshgrid(
+            torch.linspace(0, height - 1, height, device=device),
+            torch.linspace(0, width - 1, width, device=device),
             indexing='ij'
         )
-        
-        # 흐름이 적용된 좌표 계산
-        flow_x = flow_small[b, 0]  # [H, W]
-        flow_y = flow_small[b, 1]  # [H, W]
-        
-        # 목적지 좌표 계산
-        dest_x = x_grid + flow_x
-        dest_y = y_grid + flow_y
-        
-        # 목적지 좌표를 정수와 소수 부분으로 분리
-        dest_x_floor = torch.floor(dest_x).long()
-        dest_y_floor = torch.floor(dest_y).long()
-        
-        dest_x_ceil = dest_x_floor + 1
-        dest_y_ceil = dest_y_floor + 1
-        
-        # 분할 가중치 계산
-        weight_x_ceil = dest_x - dest_x_floor.float()
-        weight_y_ceil = dest_y - dest_y_floor.float()
-        
-        weight_x_floor = 1 - weight_x_ceil
-        weight_y_floor = 1 - weight_y_ceil
-        
-        # 4개의 이웃 픽셀에 가중치 분산
-        # 좌상단
-        valid = (dest_y_floor >= 0) & (dest_y_floor < output_height) & (dest_x_floor >= 0) & (dest_x_floor < output_width)
-        weight = weight_y_floor * weight_x_floor
-        for y in range(output_height):
-            for x in range(output_width):
-                if valid[y, x]:
-                    y_idx, x_idx = dest_y_floor[y, x], dest_x_floor[y, x]
-                    count_image[0, y_idx, x_idx] += weight[y, x]
-        
-        # 우상단
-        valid = (dest_y_floor >= 0) & (dest_y_floor < output_height) & (dest_x_ceil >= 0) & (dest_x_ceil < output_width)
-        weight = weight_y_floor * weight_x_ceil
-        for y in range(output_height):
-            for x in range(output_width):
-                if valid[y, x]:
-                    y_idx, x_idx = dest_y_floor[y, x], dest_x_ceil[y, x]
-                    count_image[0, y_idx, x_idx] += weight[y, x]
-        
-        # 좌하단
-        valid = (dest_y_ceil >= 0) & (dest_y_ceil < output_height) & (dest_x_floor >= 0) & (dest_x_floor < output_width)
-        weight = weight_y_ceil * weight_x_floor
-        for y in range(output_height):
-            for x in range(output_width):
-                if valid[y, x]:
-                    y_idx, x_idx = dest_y_ceil[y, x], dest_x_floor[y, x]
-                    count_image[0, y_idx, x_idx] += weight[y, x]
-        
-        # 우하단
-        valid = (dest_y_ceil >= 0) & (dest_y_ceil < output_height) & (dest_x_ceil >= 0) & (dest_x_ceil < output_width)
-        weight = weight_y_ceil * weight_x_ceil
-        for y in range(output_height):
-            for x in range(output_width):
-                if valid[y, x]:
-                    y_idx, x_idx = dest_y_ceil[y, x], dest_x_ceil[y, x]
-                    count_image[0, y_idx, x_idx] += weight[y, x]
-        
-        # 다운샘플링 효과 정규화
-        if downsampling_factor > 1:
-            count_image = count_image / (downsampling_factor ** 2)
-        
-        range_maps.append(count_image)
+    except TypeError:
+        # 이전 버전 PyTorch에서는 indexing 인자 없음
+        y_t, x_t = torch.meshgrid(
+            torch.linspace(0, height - 1, height, device=device),
+            torch.linspace(0, width - 1, width, device=device)
+        )
     
-    # 모든 배치 결합
-    range_map = torch.stack(range_maps, dim=0)
+    # 타겟 자리표를 배치 차원으로 확장
+    y_t = y_t.reshape(1, height, width, 1).repeat(batch_size, 1, 1, 1)
+    x_t = x_t.reshape(1, height, width, 1).repeat(batch_size, 1, 1, 1)
     
-    # 원본 크기로 리사이징
+    # 흐름을 사용하여 소스 자리표 계산
+    flow_u = flow_small[:, 0].permute(0, 2, 1).reshape(batch_size, width, height, 1).permute(0, 2, 1, 3)
+    flow_v = flow_small[:, 1].permute(0, 1, 2).reshape(batch_size, height, width, 1)
+    
+    x_s = x_t + flow_u
+    y_s = y_t + flow_v
+    
+    # 정수 자리표 계산
+    x_s_floor = torch.floor(x_s)
+    y_s_floor = torch.floor(y_s)
+    
+    # 가중치 계산 (bilinear 보간용)
+    alpha_x = x_s - x_s_floor
+    alpha_y = y_s - y_s_floor
+    
+    # 비선형 보간을 위한 가중치
+    w_0 = (1 - alpha_x) * (1 - alpha_y)  # top-left
+    w_1 = alpha_x * (1 - alpha_y)        # top-right
+    w_2 = (1 - alpha_x) * alpha_y        # bottom-left
+    w_3 = alpha_x * alpha_y              # bottom-right
+    
+    # 정수 자리표를 정수로 변환하고 비트 쉬프트로 해시화
+    # 이 부분은 PyTorch에서 scatter_add를 사용하기 위한 준비
+    x_s_i = x_s_floor.long()
+    y_s_i = y_s_floor.long()
+    
+    # 범위 맵 초기화
+    range_map = torch.zeros((batch_size, height, width), device=device)
+    
+    # 유효 마스크 (이미지 경계 내부 확인)
+    valid_0 = (x_s_i >= 0) & (x_s_i < width) & (y_s_i >= 0) & (y_s_i < height)
+    valid_1 = (x_s_i + 1 >= 0) & (x_s_i + 1 < width) & (y_s_i >= 0) & (y_s_i < height)
+    valid_2 = (x_s_i >= 0) & (x_s_i < width) & (y_s_i + 1 >= 0) & (y_s_i + 1 < height)
+    valid_3 = (x_s_i + 1 >= 0) & (x_s_i + 1 < width) & (y_s_i + 1 >= 0) & (y_s_i + 1 < height)
+    
+    # 각 배치에 대해 반복하여 scatter_add로 값 누적
+    for b in range(batch_size):
+        # top-left
+        idx_0 = y_s_i[b][valid_0[b]] * width + x_s_i[b][valid_0[b]]
+        val_0 = w_0[b][valid_0[b]]
+        range_map[b].reshape(-1).scatter_add_(0, idx_0.squeeze(-1), val_0.squeeze(-1))
+        
+        # top-right
+        idx_1 = y_s_i[b][valid_1[b]] * width + (x_s_i[b][valid_1[b]] + 1)
+        val_1 = w_1[b][valid_1[b]]
+        range_map[b].reshape(-1).scatter_add_(0, idx_1.squeeze(-1), val_1.squeeze(-1))
+        
+        # bottom-left
+        idx_2 = (y_s_i[b][valid_2[b]] + 1) * width + x_s_i[b][valid_2[b]]
+        val_2 = w_2[b][valid_2[b]]
+        range_map[b].reshape(-1).scatter_add_(0, idx_2.squeeze(-1), val_2.squeeze(-1))
+        
+        # bottom-right
+        idx_3 = (y_s_i[b][valid_3[b]] + 1) * width + (x_s_i[b][valid_3[b]] + 1)
+        val_3 = w_3[b][valid_3[b]]
+        range_map[b].reshape(-1).scatter_add_(0, idx_3.squeeze(-1), val_3.squeeze(-1))
+    
+    # 다운샘플링 편향 감소
+    if reduce_downsampling_bias and downsampling_factor > 1:
+        range_map = range_map * (downsampling_factor ** 2)
+    
+    # 채널 차원 추가
+    range_map = range_map.unsqueeze(1)
+    
+    # 원본 크기로 복원
     if resize_output and downsampling_factor > 1:
         range_map = F.interpolate(
-            range_map, size=(input_height, input_width), mode='bilinear', align_corners=False
+            range_map, 
+            size=(flow.shape[2], flow.shape[3]), 
+            mode='bilinear', 
+            align_corners=False
         )
     
     return range_map
@@ -1218,6 +1202,58 @@ def generate_gaussian_kernel(size=7, sigma=1.0, device='cpu'):
     
     # [1, 1, H, W] 형태로 반환
     return kernel.unsqueeze(0).unsqueeze(0)
+
+
+# forward-backward 일관성 검사 관련 함수 추가
+
+def compute_fb_squared_diff(flow_forward, flow_backward):
+    """
+    순방향 및 역방향 흐름 사이의 제곱 차이 계산
+    
+    Args:
+        flow_forward (torch.Tensor): 순방향 흐름 [B, 2, H, W]
+        flow_backward (torch.Tensor): 역방향 흐름 [B, 2, H, W]
+        
+    Returns:
+        torch.Tensor: 제곱 차이 [B, 1, H, W]
+    """
+    # 역방향 흐름 와핑
+    flow_backward_warped = warp_flow(flow_backward, flow_forward)
+    
+    # 역방향 흐름 반전 (좌표계 변환)
+    flow_backward_warped_rev = -flow_backward_warped
+    
+    # 흐름 벡터 간 차이 계산
+    diff = flow_forward - flow_backward_warped_rev
+    
+    # 제곱 차이 합 계산
+    sq_diff = torch.sum(diff**2, dim=1, keepdim=True)
+    
+    return sq_diff
+
+
+def compute_fb_sum_squared(flow_forward, flow_backward):
+    """
+    순방향 및 역방향 흐름 벡터 크기의 제곱 합 계산
+    
+    Args:
+        flow_forward (torch.Tensor): 순방향 흐름 [B, 2, H, W]
+        flow_backward (torch.Tensor): 역방향 흐름 [B, 2, H, W]
+        
+    Returns:
+        torch.Tensor: 제곱 합 [B, 1, H, W]
+    """
+    # 역방향 흐름 와핑
+    flow_backward_warped = warp_flow(flow_backward, flow_forward)
+    
+    # 흐름 벡터 크기의 제곱 계산
+    forward_sq = torch.sum(flow_forward**2, dim=1, keepdim=True)
+    backward_sq = torch.sum(flow_backward_warped**2, dim=1, keepdim=True)
+    
+    # 제곱 합 계산 (0으로 나누는 것을 방지하기 위해 작은 상수 추가)
+    sum_sq = forward_sq + backward_sq + 1e-6
+    
+    return sum_sq
 
 
 # 테스트 코드

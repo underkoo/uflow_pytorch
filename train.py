@@ -17,7 +17,7 @@ from pytorch_lightning.loggers import TensorBoardLogger
 
 from models import UFlow
 import losses
-from dataloader import MultiFrameRawDataset, SequentialFrameDataset, create_sequential_dataloader
+from dataloader import create_dataloader
 
 
 class UFlowLightningModule(pl.LightningModule):
@@ -43,7 +43,6 @@ class UFlowLightningModule(pl.LightningModule):
                  photometric_weight: float = 1.0,
                  census_weight: float = 1.0, 
                  smoothness_weight: float = 0.1,
-                 sequence_weight: float = 0.2,
                  use_occlusion: bool = True,
                  use_valid_mask: bool = True,
                  use_stop_gradient: bool = True,
@@ -76,7 +75,6 @@ class UFlowLightningModule(pl.LightningModule):
             photometric_weight: 포토메트릭 손실 가중치
             census_weight: Census 손실 가중치
             smoothness_weight: 평활화 손실 가중치
-            sequence_weight: 시퀀스 손실 가중치
             use_occlusion: 가려짐 마스크 사용 여부
             use_valid_mask: 유효 영역 마스크 사용 여부
             use_stop_gradient: 그래디언트 흐름 제어 사용 여부
@@ -112,14 +110,14 @@ class UFlowLightningModule(pl.LightningModule):
         )
         
         # 손실 함수 초기화
-        self.criterion = losses.FullSequentialLoss(
+        self.criterion = losses.MultiScaleUFlowLoss(
             photometric_weight=photometric_weight,
             census_weight=census_weight,
             smoothness_weight=smoothness_weight,
-            sequence_weight=sequence_weight,
+            ssim_weight=0.85,
+            window_size=7,
             occlusion_method='wang',
-            use_occlusion=use_occlusion,
-            use_valid_mask=use_valid_mask,
+            edge_weighting=True,
             stop_gradient=use_stop_gradient,
             bidirectional=use_bidirectional
         )
@@ -166,44 +164,14 @@ class UFlowLightningModule(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         """훈련 단계"""
         # 데이터 추출
-        if 'frames' in batch:
-            # frames는 [batch_size, seq_len, C, H, W] 형태
-            frames = batch['frames']
-            # 슬라이싱으로 각 프레임 추출
-            img_t1 = frames[:, 0]  # 첫 번째 프레임
-            img_t2 = frames[:, 1]  # 두 번째 프레임
-            img_t3 = frames[:, 2]  # 세 번째 프레임
-        elif 'frame_tm1' in batch and 'frame_t' in batch and 'frame_tp1' in batch:
-            # 별도의 키로 제공되는 경우
-            img_t1 = batch['frame_tm1']
-            img_t2 = batch['frame_t']
-            img_t3 = batch['frame_tp1']
-        else:
-            raise ValueError("지원되지 않는 배치 형식입니다. 'frames' 또는 'frame_t*' 키가 필요합니다.")
+        img_t1 = batch['frame1']
+        img_t2 = batch['frame2']
         
         # 순방향 및 역방향 흐름 계산
-        forward_flows_t1_t2, backward_flows_t2_t1, _, _ = self.model.forward_backward_flow(img_t1, img_t2)
-        forward_flows_t2_t3, backward_flows_t3_t2, _, _ = self.model.forward_backward_flow(img_t2, img_t3)
-        
-        # t1->t3 직접 흐름 계산
-        forward_flows_t1_t3, backward_flows_t3_t1, _, _ = self.model.forward_backward_flow(img_t1, img_t3)
-        
-        # 피라미드 흐름 리스트
-        flow_pyramids = [
-            forward_flows_t1_t2,
-            forward_flows_t2_t3,
-            backward_flows_t2_t1,
-            backward_flows_t3_t2
-        ]
+        forward_flows, backward_flows, _, _ = self.model.forward_backward_flow(img_t1, img_t2)
         
         # 손실 계산
-        losses = self.criterion(
-            [img_t1, img_t2, img_t3],
-            flow_pyramids,
-            forward_flows_t1_t3[0],
-            backward_flows_t3_t1[0],
-            valid_mask=None  # 유효 마스크 생성 또는 None
-        )
+        losses = self.criterion(img_t1, img_t2, forward_flows, backward_flows)
         
         # 총 손실
         total_loss = losses['total_loss']
@@ -232,44 +200,16 @@ class UFlowLightningModule(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
         """검증 단계"""
         # 데이터 추출
-        if 'frames' in batch:
-            # frames는 [batch_size, seq_len, C, H, W] 형태
-            frames = batch['frames']
-            # 슬라이싱으로 각 프레임 추출
-            img_t1 = frames[:, 0]  # 첫 번째 프레임
-            img_t2 = frames[:, 1]  # 두 번째 프레임
-            img_t3 = frames[:, 2]  # 세 번째 프레임
-        elif 'frame_tm1' in batch and 'frame_t' in batch and 'frame_tp1' in batch:
-            # 별도의 키로 제공되는 경우
-            img_t1 = batch['frame_tm1']
-            img_t2 = batch['frame_t']
-            img_t3 = batch['frame_tp1']
-        else:
-            raise ValueError("지원되지 않는 배치 형식입니다. 'frames' 또는 'frame_t*' 키가 필요합니다.")
+        img_t1 = batch['frame1']
+        img_t2 = batch['frame2']
         
         # 모델을 eval 모드로 전환하고 순방향 및 역방향 흐름 계산
         self.model.eval()
         with torch.no_grad():
-            forward_flows_t1_t2, backward_flows_t2_t1, _, _ = self.model.forward_backward_flow(img_t1, img_t2)
-            forward_flows_t2_t3, backward_flows_t3_t2, _, _ = self.model.forward_backward_flow(img_t2, img_t3)
-            forward_flows_t1_t3, backward_flows_t3_t1, _, _ = self.model.forward_backward_flow(img_t1, img_t3)
-            
-            # 피라미드 흐름 리스트
-            flow_pyramids = [
-                forward_flows_t1_t2,
-                forward_flows_t2_t3,
-                backward_flows_t2_t1,
-                backward_flows_t3_t2
-            ]
+            forward_flows, backward_flows, _, _ = self.model.forward_backward_flow(img_t1, img_t2)
             
             # 손실 계산
-            losses = self.criterion(
-                [img_t1, img_t2, img_t3],
-                flow_pyramids,
-                forward_flows_t1_t3[0],
-                backward_flows_t3_t1[0],
-                valid_mask=None  # 유효 마스크 생성 또는 None
-            )
+            losses = self.criterion(img_t1, img_t2, forward_flows, backward_flows)
             
             # 총 손실
             total_loss = losses['total_loss']
@@ -302,11 +242,10 @@ def parse_args():
     # 데이터 관련 인자
     parser.add_argument('--data_dir', type=str, required=True, help='데이터셋 디렉토리')
     parser.add_argument('--val_data_dir', type=str, default=None, help='검증 데이터셋 디렉토리 (기본값: None, 훈련 데이터 일부 사용)')
-    parser.add_argument('--seq_len', type=int, default=3, help='시퀀스 길이 (최소 3)')
-    parser.add_argument('--seq_stride', type=int, default=1, help='시퀀스 샘플링 보폭')
     parser.add_argument('--target_height', type=int, default=192, help='처리 후 이미지 높이')
     parser.add_argument('--target_width', type=int, default=256, help='처리 후 이미지 너비')
     parser.add_argument('--convert_to_rgb', action='store_true', default=True, help='Bayer RAW를 RGB로 변환')
+    parser.add_argument('--exclude_ev_minus', action='store_true', default=True, help='ev minus 프레임(인덱스 1, 2, 3) 제외')
     
     # 모델 관련 인자
     parser.add_argument('--num_channels', type=int, default=3, help='입력 이미지 채널 수')
@@ -326,11 +265,10 @@ def parse_args():
     parser.add_argument('--photometric_weight', type=float, default=1.0, help='포토메트릭 손실 가중치')
     parser.add_argument('--census_weight', type=float, default=1.0, help='센서스 손실 가중치')
     parser.add_argument('--smoothness_weight', type=float, default=0.1, help='평활화 손실 가중치')
-    parser.add_argument('--sequence_weight', type=float, default=0.2, help='시퀀스 손실 가중치')
-    parser.add_argument('--no_occlusion', action='store_false', dest='use_occlusion', help='가려짐 마스크 사용 안함')
-    parser.add_argument('--no_valid_mask', action='store_false', dest='use_valid_mask', help='유효 마스크 사용 안함')
-    parser.add_argument('--no_stop_gradient', action='store_false', dest='use_stop_gradient', help='그래디언트 흐름 제어 사용 안함')
-    parser.add_argument('--no_bidirectional', action='store_false', dest='use_bidirectional', help='양방향 손실 계산 안함')
+    parser.add_argument('--use_occlusion', action='store_false', dest='use_occlusion', help='가려짐 마스크 사용 안함')
+    parser.add_argument('--use_valid_mask', action='store_false', dest='use_valid_mask', help='유효 마스크 사용 안함')
+    parser.add_argument('--use_stop_gradient', action='store_false', dest='use_stop_gradient', help='그래디언트 흐름 제어 사용 안함')
+    parser.add_argument('--use_bidirectional', action='store_false', dest='use_bidirectional', help='양방향 손실 계산 안함')
     
     # 훈련 관련 인자
     parser.add_argument('--train_batch_size', type=int, default=4, help='훈련 배치 크기')
@@ -389,30 +327,32 @@ def main():
     logger = TensorBoardLogger(save_dir=args.log_dir, name='uflow')
     
     # 데이터 로더 생성
-    train_dataloader = create_sequential_dataloader(
+    train_dataloader = create_dataloader(
         data_dir=args.data_dir,
         batch_size=args.train_batch_size,
         num_workers=args.num_workers,
-        seq_len=args.seq_len,
-        stride=args.seq_stride,
         shuffle=True,
         target_height=args.target_height,
         target_width=args.target_width,
-        convert_to_rgb=args.convert_to_rgb
+        convert_to_rgb=args.convert_to_rgb,
+        use_augmentation=True,
+        use_photometric=True,
+        use_geometric=False,
+        exclude_ev_minus=args.exclude_ev_minus
     )
     
     # 검증 데이터 로더
     if args.val_data_dir:
-        val_dataloader = create_sequential_dataloader(
+        val_dataloader = create_dataloader(
             data_dir=args.val_data_dir,
             batch_size=args.val_batch_size,
             num_workers=args.num_workers,
-            seq_len=args.seq_len,
-            stride=args.seq_stride,
             shuffle=False,
             target_height=args.target_height,
             target_width=args.target_width,
-            convert_to_rgb=args.convert_to_rgb
+            convert_to_rgb=args.convert_to_rgb,
+            use_augmentation=False,
+            exclude_ev_minus=args.exclude_ev_minus
         )
     else:
         # 훈련 데이터의 일부를 검증에 사용
@@ -438,7 +378,6 @@ def main():
         photometric_weight=args.photometric_weight,
         census_weight=args.census_weight,
         smoothness_weight=args.smoothness_weight,
-        sequence_weight=args.sequence_weight,
         use_occlusion=args.use_occlusion,
         use_valid_mask=args.use_valid_mask,
         use_stop_gradient=args.use_stop_gradient,
