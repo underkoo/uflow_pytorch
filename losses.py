@@ -8,19 +8,47 @@ class OcclusionMask(nn.Module):
     """
     광학 흐름에서 가려짐(occlusion) 영역을 탐지하는 모듈
     """
-    def __init__(self, method='forward_backward', alpha=0.01, beta=0.5):
+    def __init__(self, method='wang', 
+                 alpha=0.01, beta=0.5,
+                 occ_weights=None,
+                 occ_thresholds=None,
+                 occ_clip_max=None):
         """
         Args:
             method (str): 가려짐 탐지 방법
                 - 'forward_backward': 순방향 및 역방향 흐름의 일관성 확인
-                - 'divergence': 발산 기반 방법
+                - 'brox': Brox의 방법
+                - 'wang': Wang et al.의 방법 (기본값)
+                - 'wang4': Wang 방법 4배 다운샘플링 적용
+                - 'uflow': UFlow 논문의 고급 복합 방법
             alpha (float): forward_backward 방식의 매개변수
             beta (float): forward_backward 방식의 매개변수
+            occ_weights (dict): uflow 방식의 가중치 매개변수
+            occ_thresholds (dict): uflow 방식의 임계값 매개변수
+            occ_clip_max (dict): uflow 방식의 최대 클리핑 값
         """
         super(OcclusionMask, self).__init__()
         self.method = method
         self.alpha = alpha
         self.beta = beta
+        
+        # UFlow 방식 매개변수
+        self.occ_weights = occ_weights if occ_weights is not None else {
+            'fb_abs': 1000.0,
+            'forward_collision': 1000.0,
+            'backward_zero': 1000.0
+        }
+        
+        self.occ_thresholds = occ_thresholds if occ_thresholds is not None else {
+            'fb_abs': 1.5,
+            'forward_collision': 0.4,
+            'backward_zero': 0.25
+        }
+        
+        self.occ_clip_max = occ_clip_max if occ_clip_max is not None else {
+            'fb_abs': 10.0,
+            'forward_collision': 5.0
+        }
     
     def forward(self, flow_forward, flow_backward):
         """
@@ -38,7 +66,10 @@ class OcclusionMask(nn.Module):
             flow_backward,
             method=self.method,
             alpha=self.alpha,
-            beta=self.beta
+            beta=self.beta,
+            occ_weights=self.occ_weights,
+            occ_thresholds=self.occ_thresholds,
+            occ_clip_max=self.occ_clip_max
         )
     
     def _warp_flow(self, flow, ref_flow):
@@ -616,25 +647,34 @@ class UFlowLoss(nn.Module):
         Returns:
             dict: 손실 딕셔너리
         """
+        # 광학 흐름 디태치 (TensorFlow의 stop_gradient와 같은 역할)
+        flow_for_occlusion = flow.detach() if self.stop_gradient else flow
+        flow_opposite_for_occlusion = flow_opposite.detach() if self.stop_gradient and flow_opposite is not None else flow_opposite
+        
         # 가려짐 마스크 계산
         occlusion_mask = None
         if self.use_occlusion and flow_opposite is not None:
-            occlusion_mask = self.occlusion_mask(flow, flow_opposite)
+            occlusion_mask = self.occlusion_mask(flow_for_occlusion, flow_opposite_for_occlusion)
             
             # stop-gradient 적용 - occlusion 마스크의 그래디언트가 네트워크에 영향을 미치지 않도록 함
             if self.stop_gradient:
                 occlusion_mask = occlusion_mask.detach()
         
-        # 와핑된 이미지 계산
+        # 와핑된 이미지 계산 (flow 그래디언트는 유지)
         img_tgt_warped = self._warp_image(img_tgt, flow)
         
         # stop-gradient 적용 - 와핑된 이미지 그래디언트가 흐름 네트워크로 직접 전파되지 않도록 함
+        # 이미지만 디태치하여 흐름에 대한 그래디언트는 보존
         if self.stop_gradient:
+            # 원본 흐름에서 와핑된 이미지의 그래디언트를 분리
             img_tgt_warped = img_tgt_warped.detach()
         
         # 각 손실 함수 계산
+        # 이미지와 마스크에 대한 그래디언트만 계산, 흐름에 대한 그래디언트는 photometric과 census에서 제외
         photometric = self.photometric_loss(img_src, img_tgt_warped, occlusion_mask, valid_mask)
         census = self.census_loss(img_src, img_tgt_warped, occlusion_mask, valid_mask)
+        
+        # smoothness 손실은 흐름에 대한 그래디언트를 포함
         smoothness = self.smoothness_loss(flow, img_src, valid_mask)
         
         # 손실 가중치 계산 (영역별 다른 가중치 적용 가능)
@@ -648,7 +688,11 @@ class UFlowLoss(nn.Module):
             if self.use_occlusion and occlusion_mask is not None:
                 weighted_mask = weighted_mask * occlusion_mask
             
+            # 정규화 팩터를 그래디언트로부터 분리
             norm_factor = torch.sum(weighted_mask) + 1e-8
+            if self.stop_gradient:
+                norm_factor = norm_factor.detach()
+                
             flow_consistency_loss = torch.sum(photometric * weighted_mask) / norm_factor
         else:
             flow_consistency_loss = torch.mean(photometric)
@@ -812,7 +856,7 @@ class SequenceLoss(nn.Module):
         # 총 손실 (가중치 적용)
         total_loss = self.alpha * flow_consistency_loss
         
-        # 결과 딕셔너리 반환
+        # 결과 딕셔너리 생성
         loss_dict = {
             'sequence_loss': total_loss,
             'flow_consistency_loss': flow_consistency_loss
@@ -840,9 +884,9 @@ class SequenceLoss(nn.Module):
 
 class MultiScaleUFlowLoss(nn.Module):
     """
-    다중 스케일 UFlow 손실
+    다중 스케일 UFlow 손실 함수
     
-    여러 해상도에서 손실을 계산하고 결합
+    각 스케일에서 손실을 계산하고 가중 평균을 구함
     """
     def __init__(
         self,
@@ -853,26 +897,36 @@ class MultiScaleUFlowLoss(nn.Module):
         window_size=7,
         occlusion_method='forward_backward',
         edge_weighting=True,
-        stop_gradient=False,
+        stop_gradient=True,
         bidirectional=False,
         scale_weights=None
     ):
         """
         Args:
-            photometric_weight (float): 포토메트릭 손실 가중치
+            photometric_weight (float): Photometric 손실 가중치
             census_weight (float): Census 손실 가중치
             smoothness_weight (float): 평활화 손실 가중치
-            ssim_weight (float): SSIM 손실 가중치 (0 ~ 1)
-            window_size (int): Census 및 SSIM 계산을 위한 창 크기
-            occlusion_method (str): 가려짐 마스크 계산 방법
-            edge_weighting (bool): 이미지 엣지에 따른 평활화 가중치 적용 여부
+            ssim_weight (float): SSIM 손실 가중치
+            window_size (int): SSIM 계산에 사용할 윈도우 크기
+            occlusion_method (str): 가려짐 탐지 방법
+            edge_weighting (bool): 에지 인식 평활화 사용 여부
             stop_gradient (bool): 역전파 중지 플래그
             bidirectional (bool): 양방향 손실 계산 여부
-            scale_weights (list, optional): 각 스케일에 대한 가중치 리스트
+            scale_weights (list): 각 스케일에 대한 가중치 (None이면 자동 계산)
         """
         super(MultiScaleUFlowLoss, self).__init__()
         
-        self.base_loss = UFlowLoss(
+        self.photometric_weight = photometric_weight
+        self.census_weight = census_weight
+        self.smoothness_weight = smoothness_weight
+        self.ssim_weight = ssim_weight
+        self.window_size = window_size
+        self.stop_gradient = stop_gradient
+        self.bidirectional = bidirectional
+        self.scale_weights = scale_weights
+        
+        # 스케일별 손실 함수
+        self.uflow_loss = UFlowLoss(
             photometric_weight=photometric_weight,
             census_weight=census_weight,
             smoothness_weight=smoothness_weight,
@@ -883,60 +937,59 @@ class MultiScaleUFlowLoss(nn.Module):
             stop_gradient=stop_gradient,
             bidirectional=bidirectional
         )
-        
-        self.scale_weights = scale_weights
     
     def _create_image_pyramid(self, image, num_scales):
         """
         이미지 피라미드 생성
-
+        
         Args:
             image (torch.Tensor): 입력 이미지 [B, C, H, W]
             num_scales (int): 피라미드 레벨 수
-
+            
         Returns:
-            list: 이미지 피라미드 리스트
+            list: 다양한 크기의 이미지 리스트
         """
         pyramid = [image]
         
-        for scale in range(1, num_scales):
-            # 이미지 크기 계산
-            height = image.shape[2] // (2 ** scale)
-            width = image.shape[3] // (2 ** scale)
-            
-            # 다운샘플링
-            scaled_image = F.interpolate(
-                image, size=(height, width), mode='bilinear', align_corners=False
-            )
-            
-            pyramid.append(scaled_image)
+        for i in range(1, num_scales):
+            if self.stop_gradient:
+                # 이전 스케일의 그래디언트를 분리하여 새 스케일 계산
+                prev_image = pyramid[-1].detach()
+            else:
+                prev_image = pyramid[-1]
+                
+            # 평균 풀링으로 다운샘플링
+            down_image = F.avg_pool2d(prev_image, kernel_size=2, stride=2)
+            pyramid.append(down_image)
         
         return pyramid
     
     def _create_mask_pyramid(self, mask, num_scales):
         """
         마스크 피라미드 생성
-
+        
         Args:
             mask (torch.Tensor): 입력 마스크 [B, 1, H, W]
             num_scales (int): 피라미드 레벨 수
-
+            
         Returns:
-            list: 마스크 피라미드 리스트
+            list: 다양한 크기의 마스크 리스트
         """
+        if mask is None:
+            return None
+            
         pyramid = [mask]
         
-        for scale in range(1, num_scales):
-            # 마스크 크기 계산
-            height = mask.shape[2] // (2 ** scale)
-            width = mask.shape[3] // (2 ** scale)
-            
-            # 다운샘플링
-            scaled_mask = F.interpolate(
-                mask, size=(height, width), mode='nearest'
-            )
-            
-            pyramid.append(scaled_mask)
+        for i in range(1, num_scales):
+            if self.stop_gradient:
+                # 이전 스케일의 그래디언트를 분리하여 새 스케일 계산
+                prev_mask = pyramid[-1].detach()
+            else:
+                prev_mask = pyramid[-1]
+                
+            # 최대 풀링으로 다운샘플링 (마스크에서는 유효성을 보존하기 위해)
+            down_mask = F.max_pool2d(prev_mask, kernel_size=2, stride=2)
+            pyramid.append(down_mask)
         
         return pyramid
     
@@ -974,42 +1027,60 @@ class MultiScaleUFlowLoss(nn.Module):
             valid_mask_pyramid = self._create_mask_pyramid(valid_mask, num_scales)
         
         # 역방향 흐름 피라미드 확인
-        if flow_pyramids_backward is not None:
-            backward_flow_exists = True
-        else:
-            backward_flow_exists = False
+        backward_flow_exists = flow_pyramids_backward is not None
         
         # 모든 스케일에 대한 손실 계산
         total_loss = 0.0
         all_losses = {}
+        all_losses['total_loss'] = 0.0
+        all_losses['photometric_loss'] = 0.0
+        all_losses['census_loss'] = 0.0
+        all_losses['smoothness_loss'] = 0.0
         
         for scale in range(num_scales):
-            # 현재 스케일의 이미지 및 흐름
-            img1_scaled = image1_pyramid[scale]
-            img2_scaled = image2_pyramid[scale]
-            flow_forward_scaled = flow_pyramids_forward[scale]
+            # 현재 스케일의 이미지와 흐름
+            img1_scale = image1_pyramid[scale]
+            img2_scale = image2_pyramid[scale]
+            flow_forward_scale = flow_pyramids_forward[scale]
+            
+            # 현재 스케일의 역방향 흐름 (있는 경우)
+            flow_backward_scale = None
+            if backward_flow_exists:
+                flow_backward_scale = flow_pyramids_backward[scale]
             
             # 현재 스케일의 유효 마스크 (있는 경우)
-            scale_valid_mask = None
+            mask_scale = None
             if valid_mask_pyramid is not None:
-                scale_valid_mask = valid_mask_pyramid[scale]
+                mask_scale = valid_mask_pyramid[scale]
             
-            # 역방향 흐름 (있는 경우)
-            flow_backward_scaled = None
-            if backward_flow_exists:
-                flow_backward_scaled = flow_pyramids_backward[scale]
-            
-            # 현재 스케일의 손실 계산
-            scale_losses = self.base_loss(
-                img1_scaled, img2_scaled, flow_forward_scaled, flow_backward_scaled, scale_valid_mask
+            # 현재 스케일에서 손실 계산
+            scale_loss_dict = self.uflow_loss(
+                img1_scale, 
+                img2_scale, 
+                flow_forward_scale, 
+                flow_backward_scale, 
+                mask_scale
             )
             
             # 스케일 가중치 적용
-            weighted_loss = scale_weights[scale] * scale_losses['total_loss']
-            total_loss += weighted_loss
+            weight = scale_weights[scale]
+            scale_total_loss = scale_loss_dict['total_loss'] * weight
             
-            # 손실 저장
-            all_losses[f'scale_{scale}'] = scale_losses
+            # 전체 손실에 누적
+            total_loss += scale_total_loss
+            
+            # 각 손실 구성 요소를 누적
+            for loss_name in ['photometric_loss', 'census_loss', 'smoothness_loss']:
+                if loss_name in scale_loss_dict:
+                    all_losses[loss_name] += scale_loss_dict[loss_name] * weight
+            
+            # 현재 스케일의 손실을 저장
+            all_losses[f'scale_{scale}_total_loss'] = scale_loss_dict['total_loss']
+            all_losses[f'scale_{scale}_weight'] = weight
+            
+            # 가려짐 마스크가 있으면 저장
+            if 'occlusion_mask' in scale_loss_dict:
+                all_losses[f'scale_{scale}_occlusion_mask'] = scale_loss_dict['occlusion_mask']
         
         # 총 손실 저장
         all_losses['total_loss'] = total_loss
@@ -1029,6 +1100,8 @@ class FullSequentialLoss(nn.Module):
         census_weight=1.0,
         smoothness_weight=1.0,
         sequence_weight=0.2,
+        ssim_weight=0.85,
+        window_size=7,
         occlusion_method='forward_backward',
         use_occlusion=True,
         use_valid_mask=True,
@@ -1044,6 +1117,8 @@ class FullSequentialLoss(nn.Module):
             census_weight (float): Census 손실 가중치
             smoothness_weight (float): 평활화 손실 가중치
             sequence_weight (float): 시퀀스 손실 가중치
+            ssim_weight (float): SSIM 손실 가중치
+            window_size (int): SSIM 계산에 사용할 윈도우 크기
             occlusion_method (str): 가려짐 탐지 방법
             use_occlusion (bool): 가려짐 마스크 사용 여부
             use_valid_mask (bool): 유효 영역 마스크 사용 여부
@@ -1060,8 +1135,8 @@ class FullSequentialLoss(nn.Module):
             photometric_weight=photometric_weight,
             census_weight=census_weight,
             smoothness_weight=smoothness_weight,
-            ssim_weight=0.85,
-            window_size=7,
+            ssim_weight=ssim_weight,
+            window_size=window_size,
             occlusion_method=occlusion_method,
             edge_weighting=edge_aware_smoothness,
             stop_gradient=stop_gradient,

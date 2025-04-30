@@ -117,7 +117,7 @@ class UFlowLightningModule(pl.LightningModule):
             census_weight=census_weight,
             smoothness_weight=smoothness_weight,
             sequence_weight=sequence_weight,
-            occlusion_method='forward_backward',
+            occlusion_method='wang',
             use_occlusion=use_occlusion,
             use_valid_mask=use_valid_mask,
             stop_gradient=use_stop_gradient,

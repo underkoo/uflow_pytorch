@@ -460,19 +460,43 @@ class PWCFlow(nn.Module):
         
         return flows
     
-    def infer_occlusion(self, flow_forward, flow_backward, method='forward_backward'):
+    def infer_occlusion(self, flow_forward, flow_backward, method='wang'):
         """
-        순방향 및 역방향 흐름에서 가려짐(occlusion) 마스크 추정
+        광학 흐름에서 가려짐 마스크 추정
         
         Args:
             flow_forward (torch.Tensor): 순방향 광학 흐름 [B, 2, H, W]
             flow_backward (torch.Tensor): 역방향 광학 흐름 [B, 2, H, W]
-            method (str): 가려짐 추정 방법
-                
+            method (str): 가려짐 추정 방식 (default: 'wang')
+            
         Returns:
             torch.Tensor: 가려짐 마스크 [B, 1, H, W], 1=가려짐 없음, 0=가려짐
         """
-        return utils.estimate_occlusion_mask(flow_forward, flow_backward, method)
+        occ_weights = {
+            'fb_abs': 1000.0,
+            'forward_collision': 1000.0,
+            'backward_zero': 1000.0
+        }
+        
+        occ_thresholds = {
+            'fb_abs': 1.5,
+            'forward_collision': 0.4,
+            'backward_zero': 0.25
+        }
+        
+        occ_clip_max = {
+            'fb_abs': 10.0,
+            'forward_collision': 5.0
+        }
+        
+        return utils.estimate_occlusion_mask(
+            flow_forward, 
+            flow_backward,
+            method=method,
+            occ_weights=occ_weights,
+            occ_thresholds=occ_thresholds,
+            occ_clip_max=occ_clip_max
+        )
 
 
 class UFlow(nn.Module):
@@ -585,15 +609,15 @@ class UFlow(nn.Module):
         
         return forward_flows, backward_flows, feature_pyramid1, feature_pyramid2
     
-    def infer_occlusion(self, flow_forward, flow_backward, method='forward_backward'):
+    def infer_occlusion(self, flow_forward, flow_backward, method='wang'):
         """
-        순방향 및 역방향 흐름에서 가려짐(occlusion) 마스크 추정
+        광학 흐름에서 가려짐 마스크 추정
         
         Args:
             flow_forward (torch.Tensor): 순방향 광학 흐름 [B, 2, H, W]
             flow_backward (torch.Tensor): 역방향 광학 흐름 [B, 2, H, W]
-            method (str): 가려짐 추정 방법
-                
+            method (str): 가려짐 추정 방식 (default: 'wang')
+            
         Returns:
             torch.Tensor: 가려짐 마스크 [B, 1, H, W], 1=가려짐 없음, 0=가려짐
         """
@@ -645,12 +669,12 @@ if __name__ == "__main__":
     # 양방향 흐름 테스트
     with torch.no_grad():
         forward_flows, backward_flows, _, _ = model.forward_backward_flow(img1, img2)
-        occlusion_mask = model.infer_occlusion(forward_flows[1], backward_flows[1])
-        warped_img2 = model.warp_image(img2, forward_flows[1])
+        occlusion_mask = model.infer_occlusion(forward_flows[0], backward_flows[0])
+        warped_img2 = model.warp_image(img2, forward_flows[0])
     
     print(f"\n양방향 흐름 테스트:")
-    print(f"순방향 흐름 크기: {forward_flows[1].shape}")
-    print(f"역방향 흐름 크기: {backward_flows[1].shape}")
+    print(f"순방향 흐름 크기: {forward_flows[0].shape}")
+    print(f"역방향 흐름 크기: {backward_flows[0].shape}")
     print(f"가려짐 마스크 크기: {occlusion_mask.shape}")
     print(f"와핑된 이미지 크기: {warped_img2.shape}")
     

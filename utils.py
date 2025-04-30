@@ -24,8 +24,18 @@ def flow_to_warp(flow):
     )
     grid = torch.stack([grid_x, grid_y]).unsqueeze(0).repeat(B, 1, 1, 1)
     
+    # 디버깅용
+    print(f"[DEBUG-WARP] 기본 그리드 x: min={grid[:, 0].min().item()}, max={grid[:, 0].max().item()}")
+    print(f"[DEBUG-WARP] 기본 그리드 y: min={grid[:, 1].min().item()}, max={grid[:, 1].max().item()}")
+    print(f"[DEBUG-WARP] 흐름 x: min={flow[:, 0].min().item()}, max={flow[:, 0].max().item()}")
+    
     # 그리드에 흐름 추가
     warp = grid + flow
+    
+    print(f"[DEBUG-WARP] 왼쪽 경계 기본 x: {grid[0, 0, H//2, :5].cpu().numpy().flatten()}")
+    print(f"[DEBUG-WARP] 왼쪽 경계 warp x: {warp[0, 0, H//2, :5].cpu().numpy().flatten()}")
+    print(f"[DEBUG-WARP] 오른쪽 경계 기본 x: {grid[0, 0, H//2, -5:].cpu().numpy().flatten()}")
+    print(f"[DEBUG-WARP] 오른쪽 경계 warp x: {warp[0, 0, H//2, -5:].cpu().numpy().flatten()}")
     
     return warp
 
@@ -150,55 +160,318 @@ def warp_features(features, flow, mode='bilinear'):
     return warped_features
 
 
-def estimate_occlusion_mask(flow_forward, flow_backward, method='forward_backward', alpha=0.01, beta=0.5):
+def compute_range_map(flow, downsampling_factor=1, reduce_downsampling_bias=True, resize_output=False):
+    """
+    광학 흐름의 범위 맵 계산 (얼마나 많은 픽셀이 특정 위치로 흐르는지)
+    
+    Args:
+        flow (torch.Tensor): 광학 흐름 [B, 2, H, W]
+        downsampling_factor (int): 다운샘플링 비율
+        reduce_downsampling_bias (bool): 다운샘플링 편향 감소 여부
+        resize_output (bool): 출력을 원본 크기로 리사이즈할지 여부
+        
+    Returns:
+        torch.Tensor: 범위 맵 [B, 1, H, W]
+    """
+    B, _, H, W = flow.shape
+    device = flow.device
+    input_height, input_width = H, W
+    
+    # 다운샘플링된 크기 계산
+    output_height = H // downsampling_factor
+    output_width = W // downsampling_factor
+    
+    # Flow 다운샘플링
+    if downsampling_factor > 1:
+        if reduce_downsampling_bias:
+            # 패딩 계산
+            p = downsampling_factor // 2
+            padded_flow = F.pad(flow, (p, p, p, p), mode='replicate')
+            
+            # 패딩된 flow를 다운샘플링
+            flow_small = F.interpolate(
+                padded_flow, 
+                size=(output_height + 2*p, output_width + 2*p), 
+                mode='bilinear', 
+                align_corners=False
+            )
+            
+            # 스케일 조정
+            flow_small = flow_small / downsampling_factor
+            
+            # 패딩 제거
+            flow_small = flow_small[:, :, p:-p, p:-p]
+        else:
+            # 단순 다운샘플링
+            flow_small = F.interpolate(
+                flow, 
+                size=(output_height, output_width), 
+                mode='bilinear', 
+                align_corners=False
+            )
+            flow_small = flow_small / downsampling_factor
+    else:
+        flow_small = flow
+    
+    # 각 배치에 대해 범위 맵 계산
+    range_maps = []
+    
+    for b in range(B):
+        # 가중치가 분산될 카운트 이미지 초기화
+        count_image = torch.zeros((1, output_height, output_width), device=device)
+        
+        # 그리드 좌표 생성
+        y_grid, x_grid = torch.meshgrid(
+            torch.arange(output_height, device=device),
+            torch.arange(output_width, device=device),
+            indexing='ij'
+        )
+        
+        # 흐름이 적용된 좌표 계산
+        flow_x = flow_small[b, 0]  # [H, W]
+        flow_y = flow_small[b, 1]  # [H, W]
+        
+        # 목적지 좌표 계산
+        dest_x = x_grid + flow_x
+        dest_y = y_grid + flow_y
+        
+        # 목적지 좌표를 정수와 소수 부분으로 분리
+        dest_x_floor = torch.floor(dest_x).long()
+        dest_y_floor = torch.floor(dest_y).long()
+        
+        dest_x_ceil = dest_x_floor + 1
+        dest_y_ceil = dest_y_floor + 1
+        
+        # 분할 가중치 계산
+        weight_x_ceil = dest_x - dest_x_floor.float()
+        weight_y_ceil = dest_y - dest_y_floor.float()
+        
+        weight_x_floor = 1 - weight_x_ceil
+        weight_y_floor = 1 - weight_y_ceil
+        
+        # 4개의 이웃 픽셀에 가중치 분산
+        # 좌상단
+        valid = (dest_y_floor >= 0) & (dest_y_floor < output_height) & (dest_x_floor >= 0) & (dest_x_floor < output_width)
+        weight = weight_y_floor * weight_x_floor
+        for y in range(output_height):
+            for x in range(output_width):
+                if valid[y, x]:
+                    y_idx, x_idx = dest_y_floor[y, x], dest_x_floor[y, x]
+                    count_image[0, y_idx, x_idx] += weight[y, x]
+        
+        # 우상단
+        valid = (dest_y_floor >= 0) & (dest_y_floor < output_height) & (dest_x_ceil >= 0) & (dest_x_ceil < output_width)
+        weight = weight_y_floor * weight_x_ceil
+        for y in range(output_height):
+            for x in range(output_width):
+                if valid[y, x]:
+                    y_idx, x_idx = dest_y_floor[y, x], dest_x_ceil[y, x]
+                    count_image[0, y_idx, x_idx] += weight[y, x]
+        
+        # 좌하단
+        valid = (dest_y_ceil >= 0) & (dest_y_ceil < output_height) & (dest_x_floor >= 0) & (dest_x_floor < output_width)
+        weight = weight_y_ceil * weight_x_floor
+        for y in range(output_height):
+            for x in range(output_width):
+                if valid[y, x]:
+                    y_idx, x_idx = dest_y_ceil[y, x], dest_x_floor[y, x]
+                    count_image[0, y_idx, x_idx] += weight[y, x]
+        
+        # 우하단
+        valid = (dest_y_ceil >= 0) & (dest_y_ceil < output_height) & (dest_x_ceil >= 0) & (dest_x_ceil < output_width)
+        weight = weight_y_ceil * weight_x_ceil
+        for y in range(output_height):
+            for x in range(output_width):
+                if valid[y, x]:
+                    y_idx, x_idx = dest_y_ceil[y, x], dest_x_ceil[y, x]
+                    count_image[0, y_idx, x_idx] += weight[y, x]
+        
+        # 다운샘플링 효과 정규화
+        if downsampling_factor > 1:
+            count_image = count_image / (downsampling_factor ** 2)
+        
+        range_maps.append(count_image)
+    
+    # 모든 배치 결합
+    range_map = torch.stack(range_maps, dim=0)
+    
+    # 원본 크기로 리사이징
+    if resize_output and downsampling_factor > 1:
+        range_map = F.interpolate(
+            range_map, size=(input_height, input_width), mode='bilinear', align_corners=False
+        )
+    
+    return range_map
+
+
+def estimate_occlusion_mask(flow_forward, flow_backward, method='forward_backward', **kwargs):
     """
     광학 흐름에서 가려짐 마스크 추정
     
     Args:
         flow_forward (torch.Tensor): 순방향 광학 흐름 [B, 2, H, W]
         flow_backward (torch.Tensor): 역방향 광학 흐름 [B, 2, H, W]
-        method (str): 마스크 추정 방식 ('forward_backward' 또는 'divergence')
-        alpha (float): 순방향-역방향 일관성 검사 매개변수
-        beta (float): forward_backward 방식의 매개변수
+        method (str): 가려짐 추정 방식
+            - 'forward_backward': 단순 순방향-역방향 일관성 확인
+            - 'brox': Brox 방식의 일관성 확인 
+            - 'wang': Wang et al.의 방법 (역방향 범위 맵 기반)
+            - 'wang4': Wang 방법의 변형: 4배 다운샘플링
+            - 'uflow': UFlow 논문의 복합 방법 (세 가지 요소 결합)
         
     Returns:
         torch.Tensor: 가려짐 마스크 [B, 1, H, W], 1=가려짐 없음, 0=가려짐
     """
-    batch_size, _, height, width = flow_forward.shape
+    # 그래디언트 전파를 막기 위해 흐름 분리
+    with torch.no_grad():
+        flow_forward_detached = flow_forward.detach()
+        flow_backward_detached = flow_backward.detach()
     
     if method == 'forward_backward':
+        alpha = kwargs.get('alpha', 0.01)
+        beta = kwargs.get('beta', 0.5)
+        
         # 역방향 흐름 와핑
-        warped_backward_flow = warp_features(flow_backward, flow_forward)
+        warped_backward_flow = warp_features(flow_backward_detached, flow_forward_detached)
         
         # 흐름 일관성 오차 계산
-        forward_mag = torch.sum(flow_forward ** 2, dim=1, keepdim=True) + 1e-6
+        forward_mag = torch.sum(flow_forward_detached ** 2, dim=1, keepdim=True) + 1e-6
         backward_mag = torch.sum(warped_backward_flow ** 2, dim=1, keepdim=True) + 1e-6
         
         # 흐름 합 계산 (이상적으로는 0)
-        flow_sum = flow_forward + warped_backward_flow
+        flow_sum = flow_forward_detached + warped_backward_flow
         flow_sum_mag = torch.sum(flow_sum ** 2, dim=1, keepdim=True)
         
         # 일관성 확인
         threshold = alpha * (forward_mag + backward_mag) + beta
         occlusion_mask = (flow_sum_mag < threshold).float()
         
-    elif method == 'divergence':
-        # 순방향 흐름의 발산 계산
-        dx, dy = compute_flow_gradients(flow_forward)
+    elif method == 'brox':
+        # 역방향 흐름 와핑
+        warped_backward_flow = warp_features(flow_backward_detached, flow_forward_detached)
         
-        # x, y 방향 발산 계산
-        div_x = dx[:, 0:1, :, :]  # x 방향 흐름의 x 미분
-        div_y = dy[:, 1:2, :, :]  # y 방향 흐름의 y 미분
+        # 순방향-역방향 제곱 차이 계산
+        flow_sum = flow_forward_detached + warped_backward_flow
+        fb_sq_diff = torch.sum(flow_sum ** 2, dim=1, keepdim=True)
         
-        # 발산 합성
-        divergence = div_x + div_y
+        # 제곱 합 계산
+        fb_sum_sq = torch.sum(flow_forward_detached ** 2 + warped_backward_flow ** 2, dim=1, keepdim=True)
         
-        # 가려짐 = 음수 발산
-        occlusion_mask = (divergence > -alpha).float()
+        # Brox 기준으로 가려짐 판별
+        occlusion_mask = (fb_sq_diff <= 0.01 * fb_sum_sq + 0.5).float()
+        
+    elif method == 'wang':
+        # Wang et al.의 방법: 역방향 흐름의 범위 맵 사용
+        range_map_backward = compute_range_map(
+            flow_backward_detached, 
+            downsampling_factor=1, 
+            reduce_downsampling_bias=False, 
+            resize_output=False
+        )
+        
+        # TensorFlow 구현과 일치: 낮은 값이 가려짐을 나타냄
+        # 범위 맵 값이 0에 가까울수록 해당 위치로 오는 흐름이 없음 = 가려짐
+        occlusion_mask = torch.clamp(range_map_backward, 0.0, 1.0)
+        
+    elif method == 'wang4':
+        # Wang 방법의 변형: 4배 다운샘플링
+        range_map_backward = compute_range_map(
+            flow_backward_detached, 
+            downsampling_factor=4, 
+            reduce_downsampling_bias=True, 
+            resize_output=True
+        )
+        
+        # TensorFlow 구현과 일치: 낮은 값이 가려짐을 나타냄
+        occlusion_mask = torch.clamp(range_map_backward, 0.0, 1.0)
+        
+    elif method == 'uflow':
+        # UFlow 논문의 복합 방법 설정값
+        occ_weights = kwargs.get('occ_weights', {
+            'fb_abs': 1000.0,
+            'forward_collision': 1000.0,
+            'backward_zero': 1000.0
+        })
+        
+        occ_thresholds = kwargs.get('occ_thresholds', {
+            'fb_abs': 1.5,
+            'forward_collision': 0.4,
+            'backward_zero': 0.25
+        })
+        
+        occ_clip_max = kwargs.get('occ_clip_max', {
+            'fb_abs': 10.0,
+            'forward_collision': 5.0
+        })
+        
+        # 사용자가 지정한 활성 요소 (기본값은 전부 활성화)
+        occ_active = kwargs.get('occ_active', {
+            'fb_abs': True,
+            'forward_collision': True,
+            'backward_zero': True
+        })
+        
+        batch_size, _, height, width = flow_forward.shape
+        device = flow_forward.device
+        occlusion_scores = {}
+        
+        # 1. 순방향-역방향 일관성 (fb_abs)
+        if 'fb_abs' in occ_weights and occ_active.get('fb_abs', True):
+            # 역방향 흐름 와핑
+            warped_backward_flow = warp_features(flow_backward_detached, flow_forward_detached)
+            
+            # 순방향-역방향 차이 계산
+            fb_diff = flow_forward_detached + warped_backward_flow
+            fb_sq_diff = torch.sum(fb_diff ** 2, dim=1, keepdim=True) ** 0.5
+            
+            # 클리핑 적용
+            occlusion_scores['fb_abs'] = torch.clamp(
+                fb_sq_diff, 0.0, occ_clip_max['fb_abs'])
+        
+        # 2. 순방향 충돌 (forward_collision)
+        if 'forward_collision' in occ_weights and occ_active.get('forward_collision', True):
+            # 순방향 흐름의 범위 맵 계산
+            range_map_forward = compute_range_map(
+                flow_forward_detached, 
+                downsampling_factor=1, 
+                reduce_downsampling_bias=True, 
+                resize_output=True
+            )
+            
+            # 순방향 범위 맵을 순방향 흐름으로 와핑
+            fwd_range_map_warped = warp_features(range_map_forward, flow_forward_detached)
+            
+            # [1, max-1] 범위로 리스케일
+            occlusion_scores['forward_collision'] = torch.clamp(
+                fwd_range_map_warped, 1.0, occ_clip_max['forward_collision']) - 1.0
+        
+        # 3. 역방향 제로 (backward_zero)
+        if 'backward_zero' in occ_weights and occ_active.get('backward_zero', True):
+            # 역방향 흐름의 범위 맵 계산
+            range_map_backward = compute_range_map(
+                flow_backward_detached, 
+                downsampling_factor=4, 
+                reduce_downsampling_bias=True, 
+                resize_output=True
+            )
+            
+            # 범위 맵이 거의 0인 지역이 가려짐 가능성 높음
+            # 0에 가까울수록 높은 점수 (가려짐 가능성)
+            occlusion_scores['backward_zero'] = (
+                1.0 - torch.clamp(range_map_backward, 0.0, 1.0))
+        
+        # 가려짐 로짓 계산
+        occlusion_logits = torch.zeros((batch_size, 1, height, width), device=device)
+        
+        for k, v in occlusion_scores.items():
+            occlusion_logits += (v - occ_thresholds[k]) * occ_weights[k]
+        
+        # 시그모이드 적용하여 최종 마스크 계산 (1=가려짐 없음, 0=가려짐)
+        # TensorFlow 구현과 일치하도록 수정
+        occlusion_mask = torch.sigmoid(-occlusion_logits)  # 높은 로짓 = 가려짐 가능성 높음
     
     else:
-        raise ValueError(f"알 수 없는 방법: {method}")
-    
+        raise ValueError(f"알 수 없는 가려짐 추정 방식: {method}")
+        
     return occlusion_mask
 
 
