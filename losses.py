@@ -417,15 +417,17 @@ class SmoothnessLoss(nn.Module):
     
     광학 흐름의 공간적 평활함을 촉진하는 손실 함수
     """
-    def __init__(self, edge_aware=True, second_order=False):
+    def __init__(self, edge_aware=True, second_order=False, edge_constant=150.0):
         """
         Args:
             edge_aware (bool): 이미지 에지를 고려한 평활화 여부
             second_order (bool): 이차 미분 사용 여부 (일차 미분보다 더 강한 평활화)
+            edge_constant (float): 에지 가중치 계산에 사용되는 상수
         """
         super(SmoothnessLoss, self).__init__()
         self.edge_aware = edge_aware
         self.second_order = second_order
+        self.edge_constant = edge_constant
     
     def forward(self, flow, image=None, valid_mask=None):
         """
@@ -451,9 +453,9 @@ class SmoothnessLoss(nn.Module):
                 img_dx = self._gradient(image, 'x')
                 img_dy = self._gradient(image, 'y')
                 
-                # 이미지 에지 가중치
-                weights_x = torch.exp(-torch.mean(torch.abs(img_dx), dim=1, keepdim=True))
-                weights_y = torch.exp(-torch.mean(torch.abs(img_dy), dim=1, keepdim=True))
+                # 이미지 에지 가중치 (exp(-edge_constant * gradient))
+                weights_x = torch.exp(-self.edge_constant * torch.mean(torch.abs(img_dx), dim=1, keepdim=True))
+                weights_y = torch.exp(-self.edge_constant * torch.mean(torch.abs(img_dy), dim=1, keepdim=True))
                 
                 # 에지 가중치 적용
                 weighted_flow_dx = flow_dx * weights_x
@@ -472,8 +474,8 @@ class SmoothnessLoss(nn.Module):
                 # 이미지 라플라시안
                 img_lap = self._gradient(self._gradient(image, 'x'), 'x') + self._gradient(self._gradient(image, 'y'), 'y')
                 
-                # 이미지 에지 가중치
-                weights = torch.exp(-torch.mean(torch.abs(img_lap), dim=1, keepdim=True))
+                # 이미지 에지 가중치 (exp(-edge_constant * gradient))
+                weights = torch.exp(-self.edge_constant * torch.mean(torch.abs(img_lap), dim=1, keepdim=True))
                 
                 # 에지 가중치 적용
                 weighted_flow_lap = flow_lap * weights
@@ -539,6 +541,7 @@ class UFlowLoss(nn.Module):
                  use_valid_mask=True,
                  second_order_smoothness=False,
                  edge_aware_smoothness=True,
+                 edge_constant=150.0,
                  stop_gradient=True,
                  bidirectional=False):
         """
@@ -553,6 +556,7 @@ class UFlowLoss(nn.Module):
             use_valid_mask (bool): 유효 영역 마스크 사용 여부
             second_order_smoothness (bool): 2차 도함수 기반 평활화 사용 여부
             edge_aware_smoothness (bool): 에지 인식 평활화 여부
+            edge_constant (float): 에지 가중치 계산에 사용되는 상수
             stop_gradient (bool): 역전파 중지 플래그
             bidirectional (bool): 양방향 손실 계산 여부
         """
@@ -571,7 +575,7 @@ class UFlowLoss(nn.Module):
         self.occlusion_mask = OcclusionMask(method=occlusion_method)
         self.photometric_loss = PhotometricLoss(use_occlusion_mask=use_occlusion, alpha=ssim_weight, ssim_window_size=window_size)
         self.census_loss = CensusLoss(use_occlusion_mask=use_occlusion)
-        self.smoothness_loss = SmoothnessLoss(edge_aware=edge_aware_smoothness, second_order=second_order_smoothness)
+        self.smoothness_loss = SmoothnessLoss(edge_aware=edge_aware_smoothness, second_order=second_order_smoothness, edge_constant=edge_constant)
     
     def forward(self, 
                 img1, 
@@ -751,6 +755,7 @@ class MultiScaleUFlowLoss(nn.Module):
         window_size=7,
         occlusion_method='forward_backward',
         edge_weighting=True,
+        edge_constant=150.0,
         stop_gradient=True,
         bidirectional=False,
         scale_weights=None
@@ -760,13 +765,14 @@ class MultiScaleUFlowLoss(nn.Module):
             photometric_weight (float): Photometric 손실 가중치
             census_weight (float): Census 손실 가중치
             smoothness_weight (float): 평활화 손실 가중치
-            ssim_weight (float): SSIM 손실 가중치
+            ssim_weight (float): Photometric 손실 내에서 SSIM 비중
             window_size (int): SSIM 계산에 사용할 윈도우 크기
             occlusion_method (str): 가려짐 탐지 방법
-            edge_weighting (bool): 에지 인식 평활화 사용 여부
+            edge_weighting (bool): 에지를 고려한 평활화 여부
+            edge_constant (float): 에지 가중치 계산에 사용되는 상수
             stop_gradient (bool): 역전파 중지 플래그
             bidirectional (bool): 양방향 손실 계산 여부
-            scale_weights (list, optional): 각 스케일에 대한 가중치 리스트
+            scale_weights (list, optional): 각 스케일의 가중치
         """
         super(MultiScaleUFlowLoss, self).__init__()
         
@@ -778,19 +784,27 @@ class MultiScaleUFlowLoss(nn.Module):
         self.stop_gradient = stop_gradient
         self.bidirectional = bidirectional
         self.scale_weights = scale_weights
+        self.edge_constant = edge_constant
         
         # 스케일별 손실 함수
-        self.uflow_loss = UFlowLoss(
-            photometric_weight=photometric_weight,
-            census_weight=census_weight,
-            smoothness_weight=smoothness_weight,
-            ssim_weight=ssim_weight,
-            window_size=window_size,
-            occlusion_method=occlusion_method,
-            edge_aware_smoothness=edge_weighting,
-            stop_gradient=stop_gradient,
-            bidirectional=bidirectional
-        )
+        self.uflow_losses = nn.ModuleList([
+            UFlowLoss(
+                photometric_weight=photometric_weight,
+                census_weight=census_weight,
+                smoothness_weight=smoothness_weight,
+                ssim_weight=ssim_weight,
+                window_size=window_size,
+                occlusion_method=occlusion_method,
+                use_occlusion=True,
+                use_valid_mask=True,
+                second_order_smoothness=False,
+                edge_aware_smoothness=edge_weighting,
+                edge_constant=edge_constant,
+                stop_gradient=stop_gradient,
+                bidirectional=bidirectional
+            )
+            for _ in range(5)  # 5개의 피라미드 레벨
+        ])
     
     def _create_image_pyramid(self, image, num_scales):
         """
@@ -908,7 +922,7 @@ class MultiScaleUFlowLoss(nn.Module):
                 mask_scale = valid_mask_pyramid[scale]
             
             # 현재 스케일에서 손실 계산
-            scale_loss_dict = self.uflow_loss(
+            scale_loss_dict = self.uflow_losses[scale](
                 img1_scale, 
                 img2_scale, 
                 flow_forward_scale, 

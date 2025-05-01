@@ -111,10 +111,10 @@ class UFlowLightningModule(pl.LightningModule):
         
         # 손실 함수 초기화
         self.criterion = losses.MultiScaleUFlowLoss(
-            photometric_weight=photometric_weight,
-            census_weight=census_weight,
-            smoothness_weight=smoothness_weight,
-            ssim_weight=0.85,
+            photometric_weight=0.0,
+            census_weight=1.0,
+            smoothness_weight=2.0,
+            ssim_weight=0.0,
             window_size=7,
             occlusion_method='wang',
             edge_weighting=True,
@@ -262,9 +262,9 @@ def parse_args():
     parser.add_argument('--shared_flow_decoder', action='store_true', help='공유 흐름 디코더 사용')
     
     # 손실 함수 관련 인자
-    parser.add_argument('--photometric_weight', type=float, default=1.0, help='포토메트릭 손실 가중치')
+    parser.add_argument('--photometric_weight', type=float, default=0.0, help='포토메트릭 손실 가중치')
     parser.add_argument('--census_weight', type=float, default=1.0, help='센서스 손실 가중치')
-    parser.add_argument('--smoothness_weight', type=float, default=0.1, help='평활화 손실 가중치')
+    parser.add_argument('--smoothness_weight', type=float, default=2.0, help='평활화 손실 가중치')
     parser.add_argument('--use_occlusion', action='store_false', dest='use_occlusion', help='가려짐 마스크 사용 안함')
     parser.add_argument('--use_valid_mask', action='store_false', dest='use_valid_mask', help='유효 마스크 사용 안함')
     parser.add_argument('--use_stop_gradient', action='store_false', dest='use_stop_gradient', help='그래디언트 흐름 제어 사용 안함')
@@ -375,9 +375,9 @@ def main():
         shared_flow_decoder=args.shared_flow_decoder,
         
         # 손실 함수 매개변수
-        photometric_weight=args.photometric_weight,
-        census_weight=args.census_weight,
-        smoothness_weight=args.smoothness_weight,
+        photometric_weight=0.0,  # 원본 TF 구현과 일치
+        census_weight=1.0,       # 원본 TF 구현과 일치
+        smoothness_weight=2.0,   # 원본 TF 구현과 일치
         use_occlusion=args.use_occlusion,
         use_valid_mask=args.use_valid_mask,
         use_stop_gradient=args.use_stop_gradient,
