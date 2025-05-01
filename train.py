@@ -256,6 +256,42 @@ class DebugLogger:
                     os.path.join(step_dir, f'features_level_{level}.png'),
                     title=f'Feature Level {level}'
                 )
+                
+                # 특징 맵 통계 기록 (로그 파일)
+                feat_stats_path = os.path.join(step_dir, f'features_level_{level}_stats.txt')
+                with open(feat_stats_path, 'w') as f:
+                    f.write(f"Feature Level {level} Statistics:\n")
+                    f.write(f"Shape: {feat1[idx].shape}\n\n")
+                    
+                    # 채널별 통계 (최대 10개 채널만)
+                    num_channels = min(10, feat1[idx].shape[0])
+                    f.write("Channel-wise Statistics (First 10 channels):\n")
+                    
+                    for c in range(num_channels):
+                        f1_chan = feat1[idx][c]
+                        f2_chan = feat2[idx][c]
+                        
+                        f.write(f"\nChannel {c}:\n")
+                        f.write(f"  Image 1 - Min: {f1_chan.min().item():.6f}, Max: {f1_chan.max().item():.6f}, ")
+                        f.write(f"Mean: {f1_chan.mean().item():.6f}, Std: {f1_chan.std().item():.6f}\n")
+                        
+                        f.write(f"  Image 2 - Min: {f2_chan.min().item():.6f}, Max: {f2_chan.max().item():.6f}, ")
+                        f.write(f"Mean: {f2_chan.mean().item():.6f}, Std: {f2_chan.std().item():.6f}\n")
+                    
+                    # 전체 통계
+                    f.write("\nOverall Statistics:\n")
+                    f.write(f"  Image 1 - Min: {feat1[idx].min().item():.6f}, Max: {feat1[idx].max().item():.6f}, ")
+                    f.write(f"Mean: {feat1[idx].mean().item():.6f}, Std: {feat1[idx].std().item():.6f}\n")
+                    
+                    f.write(f"  Image 2 - Min: {feat2[idx].min().item():.6f}, Max: {feat2[idx].max().item():.6f}, ")
+                    f.write(f"Mean: {feat2[idx].mean().item():.6f}, Std: {feat2[idx].std().item():.6f}\n")
+                    
+                    # 특징 간 차이
+                    feat_diff = (feat1[idx] - feat2[idx]).abs()
+                    f.write("\nFeature Difference:\n")
+                    f.write(f"  Mean Absolute Difference: {feat_diff.mean().item():.6f}\n")
+                    f.write(f"  Max Absolute Difference: {feat_diff.max().item():.6f}\n")
+                    f.write(f"  L1 Norm: {feat_diff.sum().item():.6f}\n")
             
             # 광학 흐름 피라미드 시각화
             for level, flow in enumerate(flows):
@@ -284,6 +320,27 @@ class DebugLogger:
                 
                 plt.tight_layout()
                 plt.savefig(os.path.join(step_dir, f'flow_level_{level}.png'))
+                plt.close()
+                
+                # 히스토그램 시각화 (수평/수직 성분 분포)
+                plt.figure(figsize=(12, 6))
+                
+                plt.subplot(1, 2, 1)
+                plt.hist(flow_np[..., 0].flatten(), bins=50, alpha=0.7, label='x-flow')
+                plt.title(f'Flow Level {level} - X Component Histogram')
+                plt.xlabel('Flow Magnitude (pixels)')
+                plt.ylabel('Frequency')
+                plt.axvline(x=0, color='r', linestyle='--')
+                
+                plt.subplot(1, 2, 2)
+                plt.hist(flow_np[..., 1].flatten(), bins=50, alpha=0.7, label='y-flow')
+                plt.title(f'Flow Level {level} - Y Component Histogram')
+                plt.xlabel('Flow Magnitude (pixels)')
+                plt.ylabel('Frequency')
+                plt.axvline(x=0, color='r', linestyle='--')
+                
+                plt.tight_layout()
+                plt.savefig(os.path.join(step_dir, f'flow_level_{level}_histogram.png'))
                 plt.close()
             
             # 와핑된 이미지 시각화
@@ -314,6 +371,47 @@ class DebugLogger:
             plt.tight_layout()
             plt.savefig(os.path.join(step_dir, 'warping_result.png'))
             plt.close()
+            
+            # 오류 히스토그램
+            plt.figure(figsize=(10, 6))
+            plt.hist(error.flatten(), bins=50, alpha=0.7)
+            plt.title('Warping Error Histogram')
+            plt.xlabel('Absolute Error')
+            plt.ylabel('Frequency')
+            plt.tight_layout()
+            plt.savefig(os.path.join(step_dir, 'warping_error_histogram.png'))
+            plt.close()
+            
+            # 요약 리포트 저장
+            report_path = os.path.join(step_dir, 'feature_summary.txt')
+            with open(report_path, 'w') as f:
+                f.write(f"Feature Visualization Summary for Step {step}\n")
+                f.write(f"====================================\n\n")
+                
+                # 피라미드 레벨 수
+                f.write(f"Number of feature pyramid levels: {len(features1)}\n")
+                f.write(f"Number of flow pyramid levels: {len(flows)}\n\n")
+                
+                # 각 레벨 크기 요약
+                f.write("Feature Pyramid Level Sizes:\n")
+                for i, (feat1, feat2) in enumerate(zip(features1, features2)):
+                    feat = feat1[idx]
+                    f.write(f"  Level {i}: {feat.shape[0]} channels, {feat.shape[1]}x{feat.shape[2]} resolution\n")
+                
+                f.write("\nFlow Pyramid Level Sizes:\n")
+                for i, flow in enumerate(flows):
+                    f.write(f"  Level {i}: {flow.shape[1]} channels, {flow.shape[2]}x{flow.shape[3]} resolution\n")
+                
+                # 입력 이미지 정보
+                f.write("\nInput Image Information:\n")
+                f.write(f"  Image 1 - Min: {img1_np.min():.4f}, Max: {img1_np.max():.4f}, Mean: {img1_np.mean():.4f}\n")
+                f.write(f"  Image 2 - Min: {img2_np.min():.4f}, Max: {img2_np.max():.4f}, Mean: {img2_np.mean():.4f}\n")
+                
+                # 와핑 오류 정보
+                f.write("\nWarping Error Information:\n")
+                f.write(f"  Mean Error: {error.mean():.6f}\n")
+                f.write(f"  Max Error: {error.max():.6f}\n")
+                f.write(f"  Median Error: {np.median(error):.6f}\n")
             
             self.log_info(f"특징 및 흐름 시각화가 {step_dir}에 저장되었습니다.")
             
@@ -382,7 +480,124 @@ class DebugLogger:
         plt.subplots_adjust(top=0.92)
         plt.savefig(save_path, dpi=150)
         plt.close()
-    
+        
+        # 특징 맵 차이 시각화 추가 (두 이미지 간의 특징 차이)
+        diff_path = save_path.replace('.png', '_diff.png')
+        feat_diff_viz = np.zeros_like(feat1_np)
+        
+        plt.figure(figsize=(int(np.ceil(np.sqrt(C))) * 3, int(np.ceil(C / np.ceil(np.sqrt(C)))) * 3))
+        plt.suptitle(f'{title} - Differences', fontsize=16)
+        
+        for c in range(C):
+            # 차이 계산 (절대값)
+            diff = np.abs(feat1_np[c] - feat2_np[c])
+            
+            # 정규화
+            diff_min, diff_max = diff.min(), diff.max()
+            if diff_max - diff_min > 1e-6:
+                feat_diff_viz[c] = (diff - diff_min) / (diff_max - diff_min)
+            else:
+                feat_diff_viz[c] = 0.0 * np.ones_like(diff)
+            
+            # 차이 시각화
+            plt.subplot(int(np.ceil(C / np.ceil(np.sqrt(C)))), int(np.ceil(np.sqrt(C))), c + 1)
+            plt.imshow(feat_diff_viz[c], cmap='hot')  # 'hot' 컬러맵으로 차이 강조
+            plt.axis('off')
+            plt.title(f'Diff Ch{c}')
+        
+        plt.tight_layout()
+        plt.subplots_adjust(top=0.92)
+        plt.savefig(diff_path, dpi=150)
+        plt.close()
+        
+        # 특징 맵 활성화 통계 시각화 (채널별 평균 활성화 강도)
+        stats_path = save_path.replace('.png', '_stats.png')
+        
+        # 채널별 평균 활성화 계산
+        feat1_mean = np.mean(np.abs(feat1_np), axis=(1, 2))
+        feat2_mean = np.mean(np.abs(feat2_np), axis=(1, 2))
+        
+        # 채널별 통계 시각화
+        plt.figure(figsize=(12, 8))
+        
+        # 활성화 평균
+        plt.subplot(2, 1, 1)
+        x = np.arange(C)
+        width = 0.35
+        plt.bar(x - width/2, feat1_mean, width, label='Image 1')
+        plt.bar(x + width/2, feat2_mean, width, label='Image 2')
+        plt.xlabel('Channel')
+        plt.ylabel('Mean Absolute Activation')
+        plt.title('Channel-wise Mean Absolute Activation')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        
+        # 이미지 간 활성화 차이
+        plt.subplot(2, 1, 2)
+        act_diff = np.abs(feat1_mean - feat2_mean)
+        plt.bar(x, act_diff, color='orange')
+        plt.xlabel('Channel')
+        plt.ylabel('Activation Difference')
+        plt.title('Absolute Difference in Channel Activations')
+        plt.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.savefig(stats_path, dpi=150)
+        plt.close()
+        
+        # 채널 유사도 시각화
+        similarity_path = save_path.replace('.png', '_similarity.png')
+        plt.figure(figsize=(10, 8))
+        
+        try:
+            # 채널 간 코사인 유사도 계산
+            from scipy.spatial.distance import cosine
+            
+            # 모든 채널 쌍에 대한 유사도 계산
+            similarity_matrix = np.zeros((C, C))
+            for i in range(C):
+                for j in range(C):
+                    f1_flat = feat1_np[i].flatten()
+                    f2_flat = feat2_np[j].flatten()
+                    
+                    # 0 벡터가 아닌 경우에만 코사인 유사도 계산
+                    if np.sum(np.abs(f1_flat)) > 1e-6 and np.sum(np.abs(f2_flat)) > 1e-6:
+                        similarity_matrix[i, j] = 1 - cosine(f1_flat, f2_flat)  # 코사인 거리를 유사도로 변환
+                    else:
+                        similarity_matrix[i, j] = 0  # 0 벡터의 경우 유사도 0으로 설정
+        except ImportError:
+            # SciPy가 설치되지 않은 경우, 간단한 대체 유사도 사용
+            similarity_matrix = np.zeros((C, C))
+            for i in range(C):
+                for j in range(C):
+                    f1_flat = feat1_np[i].flatten()
+                    f2_flat = feat2_np[j].flatten()
+                    
+                    # 간단한 L2 정규화된 내적 (유사도)
+                    f1_norm = np.linalg.norm(f1_flat)
+                    f2_norm = np.linalg.norm(f2_flat)
+                    
+                    if f1_norm > 1e-6 and f2_norm > 1e-6:
+                        similarity_matrix[i, j] = np.dot(f1_flat, f2_flat) / (f1_norm * f2_norm)
+                    else:
+                        similarity_matrix[i, j] = 0
+        
+        # 유사도 행렬 시각화
+        plt.imshow(similarity_matrix, cmap='viridis', vmin=0, vmax=1)
+        plt.colorbar(label='Cosine Similarity')
+        plt.xlabel('Image 2 Channel')
+        plt.ylabel('Image 1 Channel')
+        plt.title('Cross-image Channel Similarity')
+        
+        # 채널 인덱스 라벨 설정
+        tick_positions = np.arange(C)
+        plt.xticks(tick_positions, [str(i) for i in range(C)])
+        plt.yticks(tick_positions, [str(i) for i in range(C)])
+        
+        plt.tight_layout()
+        plt.savefig(similarity_path, dpi=150)
+        plt.close()
+
     def _flow_to_color(self, flow):
         """광학 흐름을 RGB 색상으로 변환"""
         try:
@@ -446,7 +661,8 @@ class UFlowLightningModule(pl.LightningModule):
                  
                  # 디버깅 매개변수
                  debug: bool = False,
-                 vis_interval: int = 50):
+                 vis_interval: int = 50,
+                 debug_feature_interval: int = 200):
         """
         Args:
             # 모델 매개변수
@@ -483,6 +699,7 @@ class UFlowLightningModule(pl.LightningModule):
             # 디버깅 매개변수
             debug: 디버깅 정보 출력 활성화
             vis_interval: 시각화 저장 간격 (단계 수)
+            debug_feature_interval: 특징 시각화 저장 간격 (단계 수)
         """
         super(UFlowLightningModule, self).__init__()
         
@@ -533,6 +750,7 @@ class UFlowLightningModule(pl.LightningModule):
         # 디버깅 매개변수
         self.debug = debug
         self.vis_interval = vis_interval
+        self.debug_feature_interval = debug_feature_interval
         
         # 디버그 로거 초기화
         self.debug_logger = None
@@ -580,10 +798,16 @@ class UFlowLightningModule(pl.LightningModule):
         # 현재 스텝
         global_step = self.global_step
         
-        # 디버깅 모드에서 1000 스텝마다 모델 출력 및 그래디언트 흐름 체크
-        if self.debug and self.debug_logger is not None and global_step % 1000 == 0:
+        # 디버깅 모드에서 지정된 간격마다 모델 출력 및 그래디언트 흐름 체크
+        if self.debug and self.debug_logger is not None and global_step % self.debug_feature_interval == 0:
             # 모델 출력 통계 확인
             self.debug_logger.log_model_stats(global_step, img_t1, img_t2, forward_flows)
+            
+            # 특징 피라미드 통계 기록
+            self.debug_logger.log_feature_stats(global_step, features1, features2)
+            
+            # 특징 시각화 저장
+            self.debug_logger.save_feature_visualization(global_step, img_t1, img_t2, features1, features2, forward_flows)
             
             # 그래디언트 흐름 체크
             self._check_gradient_flow(img_t1, img_t2, forward_flows, backward_flows)
@@ -940,6 +1164,28 @@ class UFlowLightningModule(pl.LightningModule):
             # 디버그 모드에서만 로그 출력
             if self.debug:
                 self.debug_logger.log_info(f"GPU {local_rank}(마스터): 시각화 저장 완료: {vis_dir}/{viz_filename}")
+                
+                # 디버그 모드에서 특징 피라미드 시각화 저장 (모델에서 features1, features2를 가져올 수 있을 때)
+                if hasattr(self, 'model') and hasattr(self.model, 'forward_backward_flow'):
+                    # 현재 이미지로 특징 피라미드 계산
+                    with torch.no_grad():
+                        _, _, features1, features2 = self.model.forward_backward_flow(img_t1, img_t2)
+                        
+                        # 특징 피라미드 시각화 저장 디렉토리 생성
+                        features_dir = os.path.join(vis_dir, 'features')
+                        os.makedirs(features_dir, exist_ok=True)
+                        
+                        # 특징 피라미드 시각화 호출
+                        self.debug_logger.save_feature_visualization(
+                            self.global_step, 
+                            img_t1, 
+                            img_t2, 
+                            features1, 
+                            features2, 
+                            forward_flows
+                        )
+                        
+                        self.debug_logger.log_info(f"GPU {local_rank}(마스터): 특징 시각화 저장 완료: {features_dir}")
             
         except Exception as e:
             if self.debug:
@@ -1007,6 +1253,7 @@ def parse_args():
     # 디버깅 및 시각화 관련 인자
     parser.add_argument('--debug', action='store_true', help='디버깅 정보 출력 활성화')
     parser.add_argument('--vis_interval', type=int, default=50, help='시각화 저장 간격 (단계 수)')
+    parser.add_argument('--debug_feature_interval', type=int, default=200, help='특징 시각화 저장 간격 (단계 수)')
     
     # 기타 인자
     parser.add_argument('--checkpoint_dir', type=str, default='/group-volume/sdp-aiip-night/dongmin/models/mpi_training/uflow/', help='체크포인트 저장 디렉토리')
@@ -1164,7 +1411,8 @@ def main():
         
         # 디버깅 매개변수
         debug=args.debug,
-        vis_interval=args.vis_interval
+        vis_interval=args.vis_interval,
+        debug_feature_interval=args.debug_feature_interval
     )
     
     # 훈련 설정
