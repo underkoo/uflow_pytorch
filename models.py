@@ -80,11 +80,8 @@ class PWCFeaturePyramid(nn.Module):
         
         # 각 레벨 순차적으로 처리
         for i in range(self.num_levels):
-            if i == 0:
-                feature = self.layers[i](x)
-            else:
-                feature = self.layers[i](features[-1])
-            features.append(feature)
+            x = self.layers[i](x)
+            features.append(x)
         
         return features
 

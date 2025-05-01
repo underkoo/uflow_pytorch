@@ -1322,12 +1322,12 @@ def main():
     else:
         print(f"훈련 데이터 디렉토리 사용: {args.data_dir}")
         train_dataloader = create_dataloader(
-            data_dir=args.data_dir,
-            batch_size=args.train_batch_size,
-            num_workers=args.num_workers,
-            shuffle=True,
-            target_height=args.target_height,
-            target_width=args.target_width,
+        data_dir=args.data_dir,
+        batch_size=args.train_batch_size,
+        num_workers=args.num_workers,
+        shuffle=True,
+        target_height=args.target_height,
+        target_width=args.target_width,
             convert_to_rgb=args.convert_to_rgb,
             use_augmentation=args.use_augmentation,
             use_photometric=args.use_photometric,
@@ -1335,7 +1335,7 @@ def main():
             exclude_ev_minus=args.exclude_ev_minus,
             apply_pregamma=args.apply_pregamma,
             pregamma_value=args.pregamma_value
-        )
+    )
     
     # 검증 데이터 로더
     val_dataloader = None
