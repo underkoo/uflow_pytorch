@@ -722,6 +722,12 @@ def parse_args():
     parser.add_argument('--apply_pregamma', action='store_true', default=True, help='어두운 이미지 보정을 위한 pre-gamma 적용')
     parser.add_argument('--pregamma_value', type=float, default=2.0, help='Pre-gamma 보정 값 (기본값: 2.0)')
     
+    # 데이터 증강 관련 인자
+    parser.add_argument('--use_augmentation', action='store_true', default=True, help='데이터 증강 사용')
+    parser.add_argument('--use_photometric', action='store_true', default=True, help='색상 변환 증강 적용')
+    parser.add_argument('--use_geometric', action='store_true', default=False, help='기하학적 변환 증강 적용')
+    parser.add_argument('--val_augmentation', action='store_true', default=False, help='검증 데이터에도 증강 적용')
+    
     # 모델 관련 인자
     parser.add_argument('--num_channels', type=int, default=3, help='입력 이미지 채널 수')
     parser.add_argument('--num_levels', type=int, default=5, help='피라미드 레벨 수')
@@ -817,9 +823,9 @@ def main():
             target_height=args.target_height,
             target_width=args.target_width,
             convert_to_rgb=args.convert_to_rgb,
-            use_augmentation=True,
-            use_photometric=True,
-            use_geometric=False,
+            use_augmentation=args.use_augmentation,
+            use_photometric=args.use_photometric,
+            use_geometric=args.use_geometric,
             exclude_ev_minus=args.exclude_ev_minus,
             apply_pregamma=args.apply_pregamma,
             pregamma_value=args.pregamma_value
@@ -834,9 +840,9 @@ def main():
             target_height=args.target_height,
             target_width=args.target_width,
             convert_to_rgb=args.convert_to_rgb,
-            use_augmentation=True,
-            use_photometric=True,
-            use_geometric=False,
+            use_augmentation=args.use_augmentation,
+            use_photometric=args.use_photometric,
+            use_geometric=args.use_geometric,
             exclude_ev_minus=args.exclude_ev_minus,
             apply_pregamma=args.apply_pregamma,
             pregamma_value=args.pregamma_value
@@ -856,7 +862,9 @@ def main():
             target_height=args.target_height,
             target_width=args.target_width,
             convert_to_rgb=args.convert_to_rgb,
-            use_augmentation=False,
+            use_augmentation=args.val_augmentation,
+            use_photometric=args.use_photometric,
+            use_geometric=args.use_geometric,
             exclude_ev_minus=args.exclude_ev_minus,
             apply_pregamma=args.apply_pregamma,
             pregamma_value=args.pregamma_value
@@ -871,7 +879,9 @@ def main():
             target_height=args.target_height,
             target_width=args.target_width,
             convert_to_rgb=args.convert_to_rgb,
-            use_augmentation=False,
+            use_augmentation=args.val_augmentation,
+            use_photometric=args.use_photometric,
+            use_geometric=args.use_geometric,
             exclude_ev_minus=args.exclude_ev_minus,
             apply_pregamma=args.apply_pregamma,
             pregamma_value=args.pregamma_value
