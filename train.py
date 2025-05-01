@@ -40,9 +40,9 @@ class UFlowLightningModule(pl.LightningModule):
                  shared_flow_decoder: bool = False,
                  
                  # 손실 함수 매개변수
-                 photometric_weight: float = 1.0,
+                 photometric_weight: float = 0.0,
                  census_weight: float = 1.0, 
-                 smoothness_weight: float = 0.1,
+                 smoothness_weight: float = 2.0,
                  use_occlusion: bool = True,
                  use_valid_mask: bool = True,
                  use_stop_gradient: bool = True,
@@ -54,7 +54,11 @@ class UFlowLightningModule(pl.LightningModule):
                  lr_decay_steps: int = 50000,
                  weight_decay: float = 0.0,
                  train_batch_size: int = 4,
-                 val_batch_size: int = 1):
+                 val_batch_size: int = 1,
+                 
+                 # 디버깅 매개변수
+                 debug: bool = False,
+                 vis_interval: int = 500):
         """
         Args:
             # 모델 매개변수
@@ -87,6 +91,10 @@ class UFlowLightningModule(pl.LightningModule):
             weight_decay: 가중치 감쇠
             train_batch_size: 훈련 배치 크기
             val_batch_size: 검증 배치 크기
+            
+            # 디버깅 매개변수
+            debug: 디버깅 정보 출력 활성화
+            vis_interval: 시각화 저장 간격 (단계 수)
         """
         super(UFlowLightningModule, self).__init__()
         
@@ -111,9 +119,9 @@ class UFlowLightningModule(pl.LightningModule):
         
         # 손실 함수 초기화
         self.criterion = losses.MultiScaleUFlowLoss(
-            photometric_weight=0.0,
-            census_weight=1.0,
-            smoothness_weight=2.0,
+            photometric_weight=photometric_weight,
+            census_weight=census_weight,
+            smoothness_weight=smoothness_weight,
             ssim_weight=0.0,
             window_size=7,
             occlusion_method='wang',
@@ -133,6 +141,10 @@ class UFlowLightningModule(pl.LightningModule):
         self.weight_decay = weight_decay
         self.train_batch_size = train_batch_size
         self.val_batch_size = val_batch_size
+        
+        # 디버깅 매개변수
+        self.debug = debug
+        self.vis_interval = vis_interval
     
     def forward(self, img1, img2):
         """모델 순전파"""
@@ -140,9 +152,13 @@ class UFlowLightningModule(pl.LightningModule):
     
     def configure_optimizers(self):
         """옵티마이저 및 학습률 스케줄러 설정"""
+        # 학습률 낮추기 - 시작 학습률을 1e-5로 감소
+        initial_lr = 1e-5
+        print(f"[옵티마이저 설정] 초기 학습률: {initial_lr}")
+        
         optimizer = optim.Adam(
             self.parameters(), 
-            lr=self.lr, 
+            lr=initial_lr, 
             weight_decay=self.weight_decay
         )
         
@@ -161,6 +177,25 @@ class UFlowLightningModule(pl.LightningModule):
             }
         }
     
+    def on_before_optimizer_step(self, optimizer, optimizer_idx):
+        """옵티마이저 스텝 실행 전 호출 - 그래디언트 클리핑 적용"""
+        # 1.0 임계값으로 그래디언트 클리핑
+        torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1.0)
+        
+        # 디버깅 모드에서 100 스텝마다 그래디언트 노름 확인
+        if self.debug and self.global_step % 100 == 0:
+            grad_norms = []
+            for param in self.parameters():
+                if param.grad is not None:
+                    grad_norms.append(param.grad.norm().item())
+            
+            if grad_norms:
+                avg_norm = sum(grad_norms) / len(grad_norms)
+                max_norm = max(grad_norms)
+                print(f"[그래디언트 클리핑] 평균 노름: {avg_norm:.6f}, 최대 노름: {max_norm:.6f}")
+            else:
+                print("[그래디언트 클리핑] 그래디언트가 없습니다!")
+    
     def training_step(self, batch, batch_idx):
         """훈련 단계"""
         # 데이터 추출
@@ -168,7 +203,14 @@ class UFlowLightningModule(pl.LightningModule):
         img_t2 = batch['frame2']
         
         # 순방향 및 역방향 흐름 계산
-        forward_flows, backward_flows, _, _ = self.model.forward_backward_flow(img_t1, img_t2)
+        forward_flows, backward_flows, features1, features2 = self.model.forward_backward_flow(img_t1, img_t2)
+        
+        # 디버깅 모드에서 가끔씩 그래디언트 흐름 체크 (1000 스텝마다)
+        if self.debug and self.global_step % 1000 == 0:
+            # 모델 출력 통계 확인
+            self.check_model_outputs(img_t1, img_t2, forward_flows)
+            # 그래디언트 흐름 체크
+            self.loss_gradient_check(img_t1, img_t2, forward_flows, backward_flows)
         
         # 손실 계산
         losses = self.criterion(img_t1, img_t2, forward_flows, backward_flows)
@@ -183,6 +225,153 @@ class UFlowLightningModule(pl.LightningModule):
         for key, value in losses.items():
             if isinstance(value, torch.Tensor) and value.numel() == 1:
                 self.log(f'train_{key}', value, on_step=False, on_epoch=True, logger=True)
+        
+        # 현재 스텝
+        global_step = self.global_step
+        
+        # 디버깅 모드에서 그래디언트 및 파라미터 통계 확인 (500 스텝마다)
+        if self.debug and global_step % 500 == 0:
+            param_stats = []
+            print("\n[파라미터 및 그래디언트 통계]")
+            for name, param in self.model.named_parameters():
+                if param.requires_grad and param.grad is not None:
+                    grad_norm = param.grad.norm().item()
+                    param_norm = param.norm().item()
+                    param_stats.append({
+                        'name': name,
+                        'grad_norm': grad_norm,
+                        'param_norm': param_norm,
+                        'ratio': grad_norm / (param_norm + 1e-8)
+                    })
+                    
+                    # NaN 또는 Inf 체크
+                    if torch.isnan(param).any() or torch.isinf(param).any():
+                        print(f"[심각] {name}에 NaN 또는 Inf 값이 있습니다!")
+                    if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
+                        print(f"[심각] {name}.grad에 NaN 또는 Inf 값이 있습니다!")
+                
+            # Top-5 가장 큰 그래디언트 비율을 가진 레이어 출력
+            param_stats.sort(key=lambda x: x['ratio'], reverse=True)
+            print("\n[Top-5 그래디언트/파라미터 비율]")
+            for i, stat in enumerate(param_stats[:5]):
+                print(f"{i+1}. {stat['name']}: 그래디언트 {stat['grad_norm']:.6f}, 파라미터 {stat['param_norm']:.6f}, 비율 {stat['ratio']:.6f}")
+            
+            # 그래디언트가 0인 레이어 수 확인
+            zero_grads = sum(1 for stat in param_stats if stat['grad_norm'] < 1e-8)
+            print(f"\n전체 레이어 수: {len(param_stats)}, 그래디언트가 0인 레이어 수: {zero_grads}")
+            
+            # 손실 통계 출력
+            print("\n[손실 통계]")
+            for key, value in losses.items():
+                if isinstance(value, torch.Tensor) and value.numel() == 1:
+                    print(f"{key}: {value.item():.6f}")
+        
+        # 시각화 (vis_interval 스텝마다)
+        if global_step % self.vis_interval == 0:
+            try:
+                import matplotlib.pyplot as plt
+                import matplotlib
+                matplotlib.use('Agg')  # GUI 없이 이미지 저장
+                import numpy as np
+                import os
+                
+                # 디렉토리 생성
+                vis_dir = os.path.join(self.logger.log_dir, 'visualizations')
+                os.makedirs(vis_dir, exist_ok=True)
+                
+                # 배치에서 첫 번째 이미지만 시각화
+                idx = 0
+                img1 = img_t1[idx].detach().cpu().permute(1, 2, 0).numpy()
+                img2 = img_t2[idx].detach().cpu().permute(1, 2, 0).numpy()
+                flow = forward_flows[0][idx].detach().cpu().permute(1, 2, 0).numpy()
+                
+                # 와핑된 이미지 계산
+                import utils
+                warped_img2 = utils.warp_image(img_t2, forward_flows[0])
+                warped_img2 = warped_img2[idx].detach().cpu().permute(1, 2, 0).numpy()
+                
+                # 옵션: 가려짐 마스크 시각화 (있는 경우)
+                occlusion_mask = None
+                if 'scale_0_occlusion_mask' in losses:
+                    occlusion_mask = losses['scale_0_occlusion_mask'][idx, 0].detach().cpu().numpy()
+                
+                # 광학 흐름 시각화 함수
+                def flow_to_color(flow):
+                    # 광학 흐름 시각화를 위한 간단한 함수
+                    hsv = np.zeros((flow.shape[0], flow.shape[1], 3), dtype=np.uint8)
+                    hsv[..., 1] = 255
+                    
+                    mag, ang = cv2.cartToPolar(flow[..., 0], flow[..., 1])
+                    hsv[..., 0] = ang * 180 / np.pi / 2
+                    hsv[..., 2] = cv2.normalize(mag, None, 0, 255, cv2.NORM_MINMAX)
+                    rgb = cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)
+                    return rgb
+                
+                try:
+                    import cv2
+                    flow_viz = flow_to_color(flow)
+                except:
+                    # cv2 없는 경우 간단한 시각화
+                    flow_viz = np.zeros_like(img1)
+                    flow_mag = np.sqrt(flow[..., 0]**2 + flow[..., 1]**2)
+                    flow_viz[..., 0] = flow[..., 0] / (flow_mag.max() + 1e-8) * 0.5 + 0.5
+                    flow_viz[..., 1] = flow[..., 1] / (flow_mag.max() + 1e-8) * 0.5 + 0.5
+                
+                # 시각화 생성
+                plt.figure(figsize=(15, 10))
+                
+                # 원본 이미지 및 와핑된 이미지
+                plt.subplot(2, 3, 1)
+                plt.imshow(img1)
+                plt.title('Image 1')
+                plt.axis('off')
+                
+                plt.subplot(2, 3, 2)
+                plt.imshow(img2)
+                plt.title('Image 2')
+                plt.axis('off')
+                
+                plt.subplot(2, 3, 3)
+                plt.imshow(warped_img2)
+                plt.title('Warped Image 2')
+                plt.axis('off')
+                
+                # 와핑 결과 시각적 평가
+                error = np.abs(img1 - warped_img2)
+                error = error / error.max()
+                
+                plt.subplot(2, 3, 4)
+                plt.imshow(flow_viz)
+                plt.title('Optical Flow')
+                plt.axis('off')
+                
+                plt.subplot(2, 3, 5)
+                plt.imshow(error)
+                plt.title('Warping Error')
+                plt.axis('off')
+                
+                if occlusion_mask is not None:
+                    plt.subplot(2, 3, 6)
+                    plt.imshow(occlusion_mask, cmap='viridis')
+                    plt.title('Occlusion Mask')
+                    plt.axis('off')
+                
+                # 시각화 저장
+                plt.tight_layout()
+                plt.savefig(os.path.join(vis_dir, f'step_{global_step:06d}.png'))
+                plt.close()
+                
+                # 손실값 기록
+                with open(os.path.join(vis_dir, f'step_{global_step:06d}_loss.txt'), 'w') as f:
+                    for key, value in losses.items():
+                        if isinstance(value, torch.Tensor) and value.numel() == 1:
+                            f.write(f"{key}: {value.item():.6f}\n")
+                            
+                if self.debug:
+                    print(f"시각화 저장 완료: {vis_dir}/step_{global_step:06d}.png")
+                
+            except Exception as e:
+                print(f"시각화 생성 중 오류 발생: {e}")
         
         # 결과 저장
         self.training_step_outputs.append(total_loss.detach())
@@ -235,6 +424,88 @@ class UFlowLightningModule(pl.LightningModule):
             self.log('val_epoch_loss', epoch_loss, prog_bar=True, logger=True)
             self.validation_step_outputs.clear()
 
+    def loss_gradient_check(self, img1, img2, flow_forward, flow_backward):
+        """
+        손실 함수의 그래디언트 흐름을 확인하는 메서드
+        디버깅 목적으로 사용
+        
+        Args:
+            img1 (torch.Tensor): 첫 번째 이미지
+            img2 (torch.Tensor): 두 번째 이미지
+            flow_forward (list): 순방향 광학 흐름 리스트
+            flow_backward (list): 역방향 광학 흐름 리스트
+        """
+        # 그래디언트 확인을 위해 새로운 텐서 생성
+        flow_check = flow_forward[0].clone().detach().requires_grad_(True)
+        
+        # 단일 스케일 손실 계산 (가장 높은 해상도)
+        with torch.enable_grad():
+            # 임시 손실 함수
+            photo_loss = losses.PhotometricLoss(alpha=0.0)  # SSIM 없이 순수 L1만 사용
+            
+            # 이미지 와핑
+            warped_img = utils.warp_image(img2, flow_check)
+            
+            # L1 손실 계산
+            loss = torch.mean(torch.abs(warped_img - img1))
+            
+            # 그래디언트 계산
+            loss.backward()
+            
+            # 그래디언트 확인
+            if flow_check.grad is None:
+                print("[심각] 손실 함수의 그래디언트가 None입니다!")
+            else:
+                flow_grad_norm = flow_check.grad.norm().item()
+                flow_norm = flow_check.norm().item()
+                ratio = flow_grad_norm / (flow_norm + 1e-8)
+                
+                print(f"[그래디언트 체크] 단순 L1 손실 그래디언트 테스트:")
+                print(f"  흐름 norm: {flow_norm:.6f}")
+                print(f"  그래디언트 norm: {flow_grad_norm:.6f}")
+                print(f"  비율: {ratio:.6f}")
+                
+                if flow_grad_norm < 1e-6:
+                    print("  [경고] 그래디언트가 너무 작습니다! 그래디언트 흐름에 문제가 있을 수 있습니다.")
+                    
+                if torch.isnan(flow_check.grad).any() or torch.isinf(flow_check.grad).any():
+                    print("  [심각] 그래디언트에 NaN 또는 Inf 값이 있습니다!")
+
+    def check_model_outputs(self, img1, img2, flows):
+        """
+        모델 출력 통계를 확인하는 메서드
+        디버깅 목적으로 사용
+        
+        Args:
+            img1 (torch.Tensor): 첫 번째 이미지
+            img2 (torch.Tensor): 두 번째 이미지
+            flows (list): 광학 흐름 피라미드
+        """
+        print("\n[모델 출력 통계]")
+        
+        # 이미지 통계
+        print(f"이미지 1 범위: {img1.min():.4f} ~ {img1.max():.4f}, 평균: {img1.mean():.4f}")
+        print(f"이미지 2 범위: {img2.min():.4f} ~ {img2.max():.4f}, 평균: {img2.mean():.4f}")
+        
+        # 흐름 통계
+        for i, flow in enumerate(flows):
+            print(f"피라미드 레벨 {i} 흐름 크기: {flow.shape}")
+            print(f"  범위: {flow.min():.4f} ~ {flow.max():.4f}, 평균 변위: {flow.abs().mean():.4f}")
+            
+            # 흐름 크기 (픽셀 변위)
+            flow_mag = torch.sqrt(flow[:, 0]**2 + flow[:, 1]**2)
+            print(f"  변위 크기 - 최소: {flow_mag.min():.4f}, 최대: {flow_mag.max():.4f}, 평균: {flow_mag.mean():.4f}")
+            
+            # 문제가 있는지 확인
+            if torch.isnan(flow).any():
+                print(f"  [심각] 레벨 {i} 흐름에 NaN 값이 있습니다!")
+            if torch.isinf(flow).any():
+                print(f"  [심각] 레벨 {i} 흐름에 Inf 값이 있습니다!")
+            
+            # 모델이 학습 중인지 확인 (흐름 값이 모두 0에 가까운 경우 의심)
+            if flow.abs().mean() < 1e-4:
+                print(f"  [경고] 레벨 {i} 흐름이 거의 0입니다. 모델이 제대로 학습되지 않을 수 있습니다.")
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description='UFlow 훈련 스크립트')
@@ -280,6 +551,10 @@ def parse_args():
     parser.add_argument('--weight_decay', type=float, default=0.0, help='가중치 감쇠')
     parser.add_argument('--epochs', type=int, default=1000, help='훈련 에폭 수')
     parser.add_argument('--val_check_interval', type=float, default=1.0, help='검증 체크 간격 (에폭의 비율 또는 단계 수)')
+    
+    # 디버깅 및 시각화 관련 인자
+    parser.add_argument('--debug', action='store_true', help='디버깅 정보 출력 활성화')
+    parser.add_argument('--vis_interval', type=int, default=50, help='시각화 저장 간격 (단계 수)')
     
     # 기타 인자
     parser.add_argument('--checkpoint_dir', type=str, default='/group-volume/sdp-aiip-night/dongmin/models/mpi_training/uflow/', help='체크포인트 저장 디렉토리')
@@ -375,9 +650,9 @@ def main():
         shared_flow_decoder=args.shared_flow_decoder,
         
         # 손실 함수 매개변수
-        photometric_weight=0.0,  # 원본 TF 구현과 일치
-        census_weight=1.0,       # 원본 TF 구현과 일치
-        smoothness_weight=2.0,   # 원본 TF 구현과 일치
+        photometric_weight=args.photometric_weight,
+        census_weight=args.census_weight,
+        smoothness_weight=args.smoothness_weight,
         use_occlusion=args.use_occlusion,
         use_valid_mask=args.use_valid_mask,
         use_stop_gradient=args.use_stop_gradient,
@@ -389,7 +664,11 @@ def main():
         lr_decay_steps=args.lr_decay_steps,
         weight_decay=args.weight_decay,
         train_batch_size=args.train_batch_size,
-        val_batch_size=args.val_batch_size
+        val_batch_size=args.val_batch_size,
+        
+        # 디버깅 매개변수
+        debug=args.debug,
+        vis_interval=args.vis_interval
     )
     
     # 훈련 설정
