@@ -67,7 +67,7 @@ class MultiFrameRawDataset(Dataset):
     """
     def __init__(self, data_dir, target_height=196, target_width=256, 
                 convert_to_rgb=True, use_augmentation=False, use_photometric=True, use_geometric=False,
-                exclude_ev_minus=True):
+                exclude_ev_minus=True, apply_pregamma=False, pregamma_value=2.0):
         """
         Args:
             data_dir (str): .npy 파일이 있는 디렉토리
@@ -79,6 +79,8 @@ class MultiFrameRawDataset(Dataset):
             use_photometric (bool): 색상 변환 증강 적용 여부
             use_geometric (bool): 기하학적 변환 증강 적용 여부
             exclude_ev_minus (bool): 'ev minus' 프레임(인덱스 1, 2, 3) 제외 여부
+            apply_pregamma (bool): 어두운 이미지 보정을 위한 pre-gamma 적용 여부
+            pregamma_value (float): gamma 보정 값 (클수록 어두운 영역이 밝아짐)
         """
         self.data_dir = Path(data_dir)
         self.file_list = sorted([f for f in self.data_dir.glob('*.npy')])
@@ -86,6 +88,8 @@ class MultiFrameRawDataset(Dataset):
         self.target_width = target_width
         self.convert_to_rgb = convert_to_rgb
         self.exclude_ev_minus = exclude_ev_minus
+        self.apply_pregamma = apply_pregamma
+        self.pregamma_value = pregamma_value
         
         # 데이터 증강 옵션
         self.use_augmentation = use_augmentation and AUGMENTATION_AVAILABLE
@@ -94,6 +98,8 @@ class MultiFrameRawDataset(Dataset):
         
         # 파일 목록 확인
         print(f"Found {len(self.file_list)} .npy files in '{data_dir}'")
+        if self.apply_pregamma:
+            print(f"Pre-gamma 보정 활성화됨 (gamma = {self.pregamma_value})")
         
         # 파일 별로 seq len 다를 수 있음
     
@@ -123,8 +129,14 @@ class MultiFrameRawDataset(Dataset):
         frame2 = multi_frames[frame_idx2]
         
         # Convert to torch tensors and normalize to [0, 1]
-        frame1 = torch.from_numpy(frame1.astype(np.float32) / 65535.0)
-        frame2 = torch.from_numpy(frame2.astype(np.float32) / 65535.0)
+        frame1 = torch.from_numpy(frame1.astype(np.float32) / 1023.0)
+        frame2 = torch.from_numpy(frame2.astype(np.float32) / 1023.0)
+        
+        # pre-gamma 보정 적용 (어두운 이미지를 더 밝게 변환)
+        if self.apply_pregamma:
+            # I' = I^(1/gamma), gamma > 1이면 어두운 영역이 더 밝아짐
+            frame1 = torch.pow(frame1, 1.0 / self.pregamma_value)
+            frame2 = torch.pow(frame2, 1.0 / self.pregamma_value)
         
         # add channel dimension
         frame1 = frame1.unsqueeze(0)
@@ -159,7 +171,7 @@ class MultiFrameRawDataset(Dataset):
 def create_dataloader(data_dir, batch_size=32, shuffle=True, num_workers=4, 
                       target_height=196, target_width=256, convert_to_rgb=True,
                       use_augmentation=False, use_photometric=True, use_geometric=False,
-                      exclude_ev_minus=True):
+                      exclude_ev_minus=True, apply_pregamma=False, pregamma_value=2.0):
     """
     MultiFrameRawDataset에 대한 데이터로더 생성
     
@@ -175,6 +187,8 @@ def create_dataloader(data_dir, batch_size=32, shuffle=True, num_workers=4,
         use_photometric (bool): 색상 변환 증강 적용 여부
         use_geometric (bool): 기하학적 변환 증강 적용 여부
         exclude_ev_minus (bool): 'ev minus' 프레임(인덱스 1, 2, 3) 제외 여부
+        apply_pregamma (bool): 어두운 이미지 보정을 위한 pre-gamma 적용 여부
+        pregamma_value (float): gamma 보정 값 (기본값: 2.0)
         
     Returns:
         torch.utils.data.DataLoader: 데이터로더
@@ -188,7 +202,9 @@ def create_dataloader(data_dir, batch_size=32, shuffle=True, num_workers=4,
         use_augmentation=use_augmentation,
         use_photometric=use_photometric,
         use_geometric=use_geometric,
-        exclude_ev_minus=exclude_ev_minus
+        exclude_ev_minus=exclude_ev_minus,
+        apply_pregamma=apply_pregamma,
+        pregamma_value=pregamma_value
     )
     
     # 데이터로더 생성
@@ -202,7 +218,8 @@ def create_dataloader(data_dir, batch_size=32, shuffle=True, num_workers=4,
     
     return dataloader
 
-def test_dataloader(data_dir, batch_size=4, use_augmentation=False, exclude_ev_minus=True):
+def test_dataloader(data_dir, batch_size=4, use_augmentation=False, exclude_ev_minus=True,
+                   apply_pregamma=False, pregamma_value=2.0):
     """
     데이터로더 테스트 및 시각화
     
@@ -211,6 +228,8 @@ def test_dataloader(data_dir, batch_size=4, use_augmentation=False, exclude_ev_m
         batch_size (int): 배치 크기
         use_augmentation (bool): 데이터 증강 사용 여부
         exclude_ev_minus (bool): 'ev minus' 프레임(인덱스 1, 2, 3) 제외 여부
+        apply_pregamma (bool): pre-gamma 보정 적용 여부
+        pregamma_value (float): gamma 보정 값 (기본값: 2.0)
     """
     # 데이터로더 생성
     dataloader = create_dataloader(
@@ -222,7 +241,9 @@ def test_dataloader(data_dir, batch_size=4, use_augmentation=False, exclude_ev_m
         use_augmentation=use_augmentation,
         use_photometric=True,      # 색상 변환 증강 활성화
         use_geometric=False,       # 기하학적 변환 비활성화 (크기 고정이므로)
-        exclude_ev_minus=exclude_ev_minus
+        exclude_ev_minus=exclude_ev_minus,
+        apply_pregamma=apply_pregamma,
+        pregamma_value=pregamma_value
     )
     
     # 데이터 로드
@@ -257,7 +278,8 @@ def test_dataloader(data_dir, batch_size=4, use_augmentation=False, exclude_ev_m
         plt.axis('off')
     
     aug_status = "enabled" if use_augmentation else "disabled"
-    plt.suptitle(f"Data Samples (Augmentation: {aug_status})")
+    gamma_status = f", Pre-gamma: {pregamma_value}" if apply_pregamma else ""
+    plt.suptitle(f"Data Samples (Augmentation: {aug_status}{gamma_status})")
     plt.tight_layout()
     plt.savefig("dataloader_test.png")
     plt.show()
@@ -274,3 +296,7 @@ if __name__ == "__main__":
     # 증강이 적용된 데이터로더 테스트
     print("\n=== Testing standard dataloader (with augmentation) ===")
     test_dataloader(data_dir, use_augmentation=True)
+    
+    # pre-gamma 보정이 적용된 데이터로더 테스트
+    print("\n=== Testing dataloader with pre-gamma correction (gamma=2.0) ===")
+    test_dataloader(data_dir, use_augmentation=False, apply_pregamma=True, pregamma_value=2.0)

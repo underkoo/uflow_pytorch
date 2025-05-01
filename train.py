@@ -711,6 +711,8 @@ def parse_args():
     parser.add_argument('--target_width', type=int, default=256, help='처리 후 이미지 너비')
     parser.add_argument('--convert_to_rgb', action='store_true', default=True, help='Bayer RAW를 RGB로 변환')
     parser.add_argument('--exclude_ev_minus', action='store_true', default=True, help='ev minus 프레임(인덱스 1, 2, 3) 제외')
+    parser.add_argument('--apply_pregamma', action='store_true', help='어두운 이미지 보정을 위한 pre-gamma 적용')
+    parser.add_argument('--pregamma_value', type=float, default=2.0, help='Pre-gamma 보정 값 (기본값: 2.0)')
     
     # 모델 관련 인자
     parser.add_argument('--num_channels', type=int, default=3, help='입력 이미지 채널 수')
@@ -807,7 +809,9 @@ def main():
         use_augmentation=True,
         use_photometric=True,
         use_geometric=False,
-        exclude_ev_minus=args.exclude_ev_minus
+        exclude_ev_minus=args.exclude_ev_minus,
+        apply_pregamma=args.apply_pregamma,
+        pregamma_value=args.pregamma_value
     )
     
     # 검증 데이터 로더
@@ -821,7 +825,9 @@ def main():
             target_width=args.target_width,
             convert_to_rgb=args.convert_to_rgb,
             use_augmentation=False,
-            exclude_ev_minus=args.exclude_ev_minus
+            exclude_ev_minus=args.exclude_ev_minus,
+            apply_pregamma=args.apply_pregamma,
+            pregamma_value=args.pregamma_value
         )
     else:
         # 훈련 데이터의 일부를 검증에 사용
