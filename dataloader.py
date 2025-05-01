@@ -152,8 +152,8 @@ class MultiFrameRawDataset(Dataset):
         frame2 = multi_frames[frame_idx2]
         
         # Convert to torch tensors and normalize to [0, 1]
-        frame1 = torch.from_numpy(frame1.astype(np.float32) / 1023.0)
-        frame2 = torch.from_numpy(frame2.astype(np.float32) / 1023.0)
+        frame1 = torch.from_numpy(frame1.astype(np.float32) / 4095.0)
+        frame2 = torch.from_numpy(frame2.astype(np.float32) / 4095.0)
         
         # pre-gamma 보정 적용 (어두운 이미지를 더 밝게 변환)
         if self.apply_pregamma:

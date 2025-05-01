@@ -54,31 +54,6 @@ def save_file_list(file_list, output_file):
     
     print(f"Saved {len(file_list)} file paths to {output_file}")
 
-def verify_files(file_list):
-    """
-    Verify that the .npy files have the expected format (11×3000×4000).
-    
-    Args:
-        file_list: List of .npy file paths
-    
-    Returns:
-        valid_files: List of valid file paths
-    """
-    valid_files = []
-    
-    for file_path in file_list:
-        try:
-            # Load just the header information without loading the entire array
-            array_shape = np.load(file_path, mmap_mode='r').shape
-            
-            if len(array_shape) == 3 and array_shape[0] == 11 and array_shape[1] == 3000 and array_shape[2] == 4000:
-                valid_files.append(file_path)
-            else:
-                print(f"Warning: File {file_path} has unexpected shape {array_shape}, skipping")
-        except Exception as e:
-            print(f"Error loading {file_path}: {e}")
-    
-    return valid_files
 
 def main():
     # Configuration
@@ -90,20 +65,13 @@ def main():
     # Create train/val split
     train_files, val_files = split_dataset(data_folder, train_ratio)
     
-    # Verify files have the correct format
-    print("Verifying training files...")
-    valid_train_files = verify_files(train_files)
-    
-    print("Verifying validation files...")
-    valid_val_files = verify_files(val_files)
-    
     # Save to text files
-    save_file_list(valid_train_files, train_txt)
-    save_file_list(valid_val_files, val_txt)
+    save_file_list(train_files, train_txt)
+    save_file_list(val_files, val_txt)
     
     print("\nSummary:")
-    print(f"Original train files: {len(train_files)}, Valid: {len(valid_train_files)}")
-    print(f"Original validation files: {len(val_files)}, Valid: {len(valid_val_files)}")
+    print(f"Original train files: {len(train_files)}")
+    print(f"Original validation files: {len(val_files)}")
     print(f"Training file list saved to: {train_txt}")
     print(f"Validation file list saved to: {val_txt}")
 

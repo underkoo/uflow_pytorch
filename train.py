@@ -353,12 +353,12 @@ class UFlowLightningModule(pl.LightningModule):
         total_loss = losses['total_loss']
         
         # 로깅
-        self.log('train_loss', total_loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
+        self.log('train_loss', total_loss, on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
         
         # 개별 손실 로깅
         for key, value in losses.items():
             if isinstance(value, torch.Tensor) and value.numel() == 1:
-                self.log(f'train_{key}', value, on_step=False, on_epoch=True, logger=True)
+                self.log(f'train_{key}', value, on_step=False, on_epoch=True, logger=True, sync_dist=True)
         
         # 디버깅 모드에서 손실 정보를 1000 스텝마다 로깅
         if self.debug and self.debug_logger is not None and global_step % 1000 == 0:
@@ -378,7 +378,7 @@ class UFlowLightningModule(pl.LightningModule):
         # 평균 손실 계산
         if self.training_step_outputs:
             epoch_loss = torch.stack(self.training_step_outputs).mean()
-            self.log('train_epoch_loss', epoch_loss, prog_bar=True, logger=True)
+            self.log('train_epoch_loss', epoch_loss, prog_bar=True, logger=True, sync_dist=True)
             self.training_step_outputs.clear()
     
     def validation_step(self, batch, batch_idx):
@@ -399,12 +399,12 @@ class UFlowLightningModule(pl.LightningModule):
             total_loss = losses['total_loss']
         
         # 로깅
-        self.log('val_loss', total_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True)
+        self.log('val_loss', total_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
         
         # 개별 손실 로깅
         for key, value in losses.items():
             if isinstance(value, torch.Tensor) and value.numel() == 1:
-                self.log(f'val_{key}', value, on_step=False, on_epoch=True, logger=True)
+                self.log(f'val_{key}', value, on_step=False, on_epoch=True, logger=True, sync_dist=True)
         
         # 결과 저장
         self.validation_step_outputs.append(total_loss.detach())
@@ -416,7 +416,7 @@ class UFlowLightningModule(pl.LightningModule):
         # 평균 손실 계산
         if self.validation_step_outputs:
             epoch_loss = torch.stack(self.validation_step_outputs).mean()
-            self.log('val_epoch_loss', epoch_loss, prog_bar=True, logger=True)
+            self.log('val_epoch_loss', epoch_loss, prog_bar=True, logger=True, sync_dist=True)
             self.validation_step_outputs.clear()
 
     def loss_gradient_check(self, img1, img2, flow_forward, flow_backward):
