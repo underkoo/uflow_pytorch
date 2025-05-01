@@ -62,6 +62,11 @@ class DebugLogger:
             self.logger.addHandler(console_handler)
             
             self.log_info(f"디버그 로그 초기화 완료. 로그 파일: {self.log_file}")
+            
+            # 특징 시각화를 위한 디렉토리 생성
+            self.features_dir = os.path.join(log_dir, 'features')
+            os.makedirs(self.features_dir, exist_ok=True)
+            self.log_info(f"특징 시각화 디렉토리 생성: {self.features_dir}")
     
     def log_debug(self, message):
         """디버그 레벨 로그 (파일에만 저장)"""
@@ -118,6 +123,42 @@ class DebugLogger:
             if flow.abs().mean() < 1e-4:
                 self.log_warning(f"[경고] 레벨 {i} 흐름이 거의 0입니다. 모델이 제대로 학습되지 않을 수 있습니다.")
     
+    def log_feature_stats(self, step, features1, features2):
+        """특징 피라미드 통계 기록"""
+        if not self.enabled:
+            return
+            
+        self.log_info(f"\n[스텝 {step}] 특징 피라미드 통계")
+        
+        # 특징 통계
+        for i, (feat1, feat2) in enumerate(zip(features1, features2)):
+            self.log_info(f"피라미드 레벨 {i} 특징 크기: {feat1.shape}")
+            self.log_info(f"  특징1 범위: {feat1.min():.4f} ~ {feat1.max():.4f}, 평균: {feat1.mean():.4f}, 표준편차: {feat1.std():.4f}")
+            self.log_info(f"  특징2 범위: {feat2.min():.4f} ~ {feat2.max():.4f}, 평균: {feat2.mean():.4f}, 표준편차: {feat2.std():.4f}")
+            
+            # 활성화 정보 (L1 norm)
+            feat1_norm = feat1.abs().mean().item()
+            feat2_norm = feat2.abs().mean().item()
+            self.log_info(f"  특징1 L1 norm: {feat1_norm:.6f}, 특징2 L1 norm: {feat2_norm:.6f}")
+            
+            # 특징 간 차이
+            feat_diff = (feat1 - feat2).abs().mean().item()
+            self.log_info(f"  특징 간 평균 절대 차이: {feat_diff:.6f}")
+            
+            # 문제가 있는지 확인
+            if torch.isnan(feat1).any() or torch.isnan(feat2).any():
+                self.log_error(f"[심각] 레벨 {i} 특징에 NaN 값이 있습니다!")
+            if torch.isinf(feat1).any() or torch.isinf(feat2).any():
+                self.log_error(f"[심각] 레벨 {i} 특징에 Inf 값이 있습니다!")
+            
+            # 특징이 의미 있는지 확인 (모든 값이 거의 0인 경우)
+            if feat1_norm < 1e-4 or feat2_norm < 1e-4:
+                self.log_warning(f"[경고] 레벨 {i} 특징이 거의 0입니다. 특징 추출기가 제대로 학습되지 않을 수 있습니다.")
+            
+            # 특징이 거의 동일한지 확인 (거의 변화가 없는 경우)
+            if feat_diff < 1e-6:
+                self.log_warning(f"[경고] 레벨 {i} 특징 간 차이가 거의 없습니다. 두 이미지가 동일하게 인식될 수 있습니다.")
+    
     def log_gradient_stats(self, step, param_stats):
         """그래디언트 통계 기록"""
         if not self.enabled:
@@ -164,6 +205,207 @@ class DebugLogger:
         
         if grad_norm < 1e-6:
             self.log_warning("  [경고] 그래디언트가 너무 작습니다! 그래디언트 흐름에 문제가 있을 수 있습니다.")
+    
+    def save_feature_visualization(self, step, img1, img2, features1, features2, flows):
+        """특징 피라미드 및 광학 흐름 시각화 저장"""
+        if not self.enabled or not self.features_dir:
+            return
+            
+        try:
+            import matplotlib.pyplot as plt
+            import matplotlib
+            matplotlib.use('Agg')  # GUI 없이 이미지 저장
+            import numpy as np
+            import cv2
+            
+            # 현재 랭크 확인 (분산 환경에서 랭크 0에서만 저장)
+            is_master = True
+            local_rank = 0
+            
+            # 스텝별 디렉토리 생성
+            step_dir = os.path.join(self.features_dir, f'step_{step:06d}')
+            os.makedirs(step_dir, exist_ok=True)
+            
+            # 배치에서 첫 번째 샘플만 시각화
+            idx = 0
+            
+            # 입력 이미지 시각화
+            img1_np = img1[idx].detach().cpu().permute(1, 2, 0).numpy()
+            img2_np = img2[idx].detach().cpu().permute(1, 2, 0).numpy()
+            
+            plt.figure(figsize=(12, 6))
+            plt.subplot(1, 2, 1)
+            plt.imshow(np.clip(img1_np, 0, 1))
+            plt.title('Image 1')
+            plt.axis('off')
+            
+            plt.subplot(1, 2, 2)
+            plt.imshow(np.clip(img2_np, 0, 1))
+            plt.title('Image 2')
+            plt.axis('off')
+            
+            plt.tight_layout()
+            plt.savefig(os.path.join(step_dir, 'input_images.png'))
+            plt.close()
+            
+            # 특징 피라미드 시각화
+            for level, (feat1, feat2) in enumerate(zip(features1, features2)):
+                # 각 레벨의 특징 맵 시각화
+                self._visualize_feature_maps(
+                    feat1[idx], feat2[idx], 
+                    os.path.join(step_dir, f'features_level_{level}.png'),
+                    title=f'Feature Level {level}'
+                )
+            
+            # 광학 흐름 피라미드 시각화
+            for level, flow in enumerate(flows):
+                flow_np = flow[idx].detach().cpu().permute(1, 2, 0).numpy()
+                
+                # 광학 흐름을 색상으로 변환
+                flow_rgb = self._flow_to_color(flow_np)
+                
+                # 흐름 크기 (픽셀 변위) 계산
+                flow_mag = np.sqrt(flow_np[..., 0]**2 + flow_np[..., 1]**2)
+                flow_mag_norm = flow_mag / (flow_mag.max() + 1e-8)
+                
+                # 저장
+                plt.figure(figsize=(12, 6))
+                
+                plt.subplot(1, 2, 1)
+                plt.imshow(flow_rgb)
+                plt.title(f'Flow Level {level} (Color)')
+                plt.axis('off')
+                
+                plt.subplot(1, 2, 2)
+                plt.imshow(flow_mag_norm, cmap='inferno')
+                plt.title(f'Flow Level {level} (Magnitude)')
+                plt.colorbar(fraction=0.046, pad=0.04)
+                plt.axis('off')
+                
+                plt.tight_layout()
+                plt.savefig(os.path.join(step_dir, f'flow_level_{level}.png'))
+                plt.close()
+            
+            # 와핑된 이미지 시각화
+            import utils
+            warped_img2 = utils.warp_image(img2, flows[0])
+            warped_img2_np = warped_img2[idx].detach().cpu().permute(1, 2, 0).numpy()
+            
+            error = np.abs(img1_np - warped_img2_np)
+            error_norm = np.clip(error / (error.max() + 1e-8), 0, 1)
+            
+            plt.figure(figsize=(18, 6))
+            
+            plt.subplot(1, 3, 1)
+            plt.imshow(np.clip(img1_np, 0, 1))
+            plt.title('Image 1')
+            plt.axis('off')
+            
+            plt.subplot(1, 3, 2)
+            plt.imshow(np.clip(warped_img2_np, 0, 1))
+            plt.title('Warped Image 2')
+            plt.axis('off')
+            
+            plt.subplot(1, 3, 3)
+            plt.imshow(error_norm)
+            plt.title('Warping Error')
+            plt.axis('off')
+            
+            plt.tight_layout()
+            plt.savefig(os.path.join(step_dir, 'warping_result.png'))
+            plt.close()
+            
+            self.log_info(f"특징 및 흐름 시각화가 {step_dir}에 저장되었습니다.")
+            
+            return True
+            
+        except Exception as e:
+            self.log_error(f"특징 시각화 중 오류 발생: {str(e)}")
+            import traceback
+            self.log_error(traceback.format_exc())
+            return False
+    
+    def _visualize_feature_maps(self, feat1, feat2, save_path, title='Feature Maps', max_channels=16):
+        """특징 맵 시각화 및 저장"""
+        import matplotlib.pyplot as plt
+        import numpy as np
+        
+        # 채널 수 제한 (너무 많으면 시각화가 복잡해짐)
+        C = min(feat1.shape[0], max_channels)
+        
+        # 특징 맵을 [C, H, W] -> [H, W, C] 변환 후 numpy 배열로 변환
+        feat1_np = feat1[:C].detach().cpu().numpy()
+        feat2_np = feat2[:C].detach().cpu().numpy()
+        
+        # 배치 정규화를 통한 시각화 (각 특징 맵마다 개별 정규화)
+        feat1_viz = np.zeros_like(feat1_np)
+        feat2_viz = np.zeros_like(feat2_np)
+        
+        for c in range(C):
+            # 최소-최대 정규화
+            f1_min, f1_max = feat1_np[c].min(), feat1_np[c].max()
+            f2_min, f2_max = feat2_np[c].min(), feat2_np[c].max()
+            
+            # 범위가 0인 경우 (상수) 처리
+            if f1_max - f1_min > 1e-6:
+                feat1_viz[c] = (feat1_np[c] - f1_min) / (f1_max - f1_min)
+            else:
+                feat1_viz[c] = 0.5 * np.ones_like(feat1_np[c])
+                
+            if f2_max - f2_min > 1e-6:
+                feat2_viz[c] = (feat2_np[c] - f2_min) / (f2_max - f2_min)
+            else:
+                feat2_viz[c] = 0.5 * np.ones_like(feat2_np[c])
+        
+        # 그리드 계산
+        grid_size = int(np.ceil(np.sqrt(C * 2)))  # 두 이미지의 특징 맵을 함께 표시
+        n_rows = int(np.ceil(C * 2 / grid_size))
+        
+        # 전체 특징 맵 시각화
+        plt.figure(figsize=(grid_size * 2, n_rows * 2))
+        plt.suptitle(title, fontsize=16)
+        
+        for i in range(C):
+            # 이미지 1의 특징 맵
+            plt.subplot(n_rows, grid_size, i * 2 + 1)
+            plt.imshow(feat1_viz[i], cmap='viridis')
+            plt.axis('off')
+            plt.title(f'Img1 Ch{i}')
+            
+            # 이미지 2의 특징 맵
+            plt.subplot(n_rows, grid_size, i * 2 + 2)
+            plt.imshow(feat2_viz[i], cmap='viridis')
+            plt.axis('off')
+            plt.title(f'Img2 Ch{i}')
+        
+        plt.tight_layout()
+        plt.subplots_adjust(top=0.92)
+        plt.savefig(save_path, dpi=150)
+        plt.close()
+    
+    def _flow_to_color(self, flow):
+        """광학 흐름을 RGB 색상으로 변환"""
+        try:
+            import cv2
+            import numpy as np
+            
+            # 광학 흐름 시각화를 위한 간단한 함수
+            hsv = np.zeros((flow.shape[0], flow.shape[1], 3), dtype=np.uint8)
+            hsv[..., 1] = 255
+            
+            mag, ang = cv2.cartToPolar(flow[..., 0], flow[..., 1])
+            hsv[..., 0] = ang * 180 / np.pi / 2
+            hsv[..., 2] = cv2.normalize(mag, None, 0, 255, cv2.NORM_MINMAX)
+            rgb = cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)
+            return rgb
+        except:
+            # cv2 없는 경우 간단한 시각화
+            viz = np.zeros_like(flow)
+            flow_mag = np.sqrt(flow[..., 0]**2 + flow[..., 1]**2)
+            viz[..., 0] = np.clip(flow[..., 0] / (flow_mag.max() + 1e-8) * 0.5 + 0.5, 0, 1)
+            viz[..., 1] = np.clip(flow[..., 1] / (flow_mag.max() + 1e-8) * 0.5 + 0.5, 0, 1)
+            viz[..., 2] = np.clip(flow_mag / (flow_mag.max() + 1e-8), 0, 1)
+            return viz
 
 
 class UFlowLightningModule(pl.LightningModule):
@@ -302,7 +544,7 @@ class UFlowLightningModule(pl.LightningModule):
     def configure_optimizers(self):
         """옵티마이저 및 학습률 스케줄러 설정"""
         # 학습률 낮추기 - 시작 학습률을 1e-5로 감소
-        initial_lr = 1e-5
+        initial_lr = self.lr
         print(f"[옵티마이저 설정] 초기 학습률: {initial_lr}")
         
         optimizer = optim.Adam(
@@ -743,7 +985,7 @@ def parse_args():
     parser.add_argument('--shared_flow_decoder', action='store_true', help='공유 흐름 디코더 사용')
     
     # 손실 함수 관련 인자
-    parser.add_argument('--photometric_weight', type=float, default=0.0, help='포토메트릭 손실 가중치')
+    parser.add_argument('--photometric_weight', type=float, default=1.0, help='포토메트릭 손실 가중치')
     parser.add_argument('--census_weight', type=float, default=1.0, help='센서스 손실 가중치')
     parser.add_argument('--smoothness_weight', type=float, default=2.0, help='평활화 손실 가중치')
     parser.add_argument('--use_occlusion', action='store_false', dest='use_occlusion', help='가려짐 마스크 사용 안함')

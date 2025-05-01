@@ -23,7 +23,7 @@ def numeric_inverse_permutation(n: int) -> np.ndarray:
     """
     lex_order = sorted(range(n), key=lambda x: f"_{x}_")  # 핵심 한 줄 수정
     return np.argsort(lex_order)
-    
+
 def preprocess_raw_bayer(raw_image, target_height=196, target_width=256):
     """
     Bayer RAW 이미지를 RGB로 변환하는 함수
@@ -144,7 +144,7 @@ class MultiFrameRawDataset(Dataset):
         num_frames = multi_frames.shape[0]
 
         inv = numeric_inverse_permutation(num_frames)
-        multi_frames_correct = multi_frames[inv]   
+        multi_frames = multi_frames[inv]   
         
         # 'ev minus' 프레임 제외 설정
         available_indices = list(range(num_frames))
