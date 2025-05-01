@@ -292,7 +292,7 @@ class UFlowLightningModule(pl.LightningModule):
         self.debug = debug
         self.vis_interval = vis_interval
         
-        # 디버그 로거는 on_setup_start에서 초기화 (log_dir이 있어야 함)
+        # 디버그 로거 초기화
         self.debug_logger = None
     
     def forward(self, img1, img2):
@@ -339,7 +339,7 @@ class UFlowLightningModule(pl.LightningModule):
         global_step = self.global_step
         
         # 디버깅 모드에서 1000 스텝마다 모델 출력 및 그래디언트 흐름 체크
-        if self.debug and global_step % 1000 == 0:
+        if self.debug and self.debug_logger is not None and global_step % 1000 == 0:
             # 모델 출력 통계 확인
             self.debug_logger.log_model_stats(global_step, img_t1, img_t2, forward_flows)
             
@@ -361,7 +361,7 @@ class UFlowLightningModule(pl.LightningModule):
                 self.log(f'train_{key}', value, on_step=False, on_epoch=True, logger=True)
         
         # 디버깅 모드에서 손실 정보를 1000 스텝마다 로깅
-        if self.debug and global_step % 1000 == 0:
+        if self.debug and self.debug_logger is not None and global_step % 1000 == 0:
             self.debug_logger.log_loss_info(global_step, losses)
         
         # 시각화 (vis_interval 스텝마다)
@@ -501,39 +501,19 @@ class UFlowLightningModule(pl.LightningModule):
             if flow.abs().mean() < 1e-4:
                 print(f"  [경고] 레벨 {i} 흐름이 거의 0입니다. 모델이 제대로 학습되지 않을 수 있습니다.")
 
-    def on_setup_start(self):
+    def on_fit_start(self):
         """훈련 시작 시 호출되는 메서드 - 디버그 로거 초기화"""
         # 디버그 로거 초기화
         if self.debug:
             log_dir = self.logger.log_dir if self.logger is not None else './logs'
             self.debug_logger = DebugLogger(log_dir, enabled=self.debug)
-            self.debug_logger.log_info("UFlow 훈련 시작")
+            print(f"[디버그] 디버그 로거가 초기화되었습니다. 경로: {log_dir}")
+            if self.debug_logger is not None:
+                self.debug_logger.log_info("UFlow 훈련 시작")
         else:
             self.debug_logger = DebugLogger(None, enabled=False)
-
-    def on_before_optimizer_step(self, optimizer, optimizer_idx):
-        """옵티마이저 스텝 실행 전 호출 - 그래디언트 클리핑 적용"""
-        # 1.0 임계값으로 그래디언트 클리핑
-        torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1.0)
-        
-        # 디버깅 모드에서 100 스텝마다 그래디언트 노름 확인
-        if self.debug and self.global_step % 100 == 0:
-            grad_norms = []
-            for param in self.parameters():
-                if param.grad is not None:
-                    grad_norms.append(param.grad.norm().item())
-            
-            if grad_norms:
-                avg_norm = sum(grad_norms) / len(grad_norms)
-                max_norm = max(grad_norms)
-                self.debug_logger.log_info(f"[그래디언트 클리핑] 평균 노름: {avg_norm:.6f}, 최대 노름: {max_norm:.6f}")
-                
-                # 그래디언트가 너무 작으면 경고
-                if avg_norm < 1e-6:
-                    self.debug_logger.log_warning(f"[경고] 그래디언트 평균 노름이 너무 작습니다: {avg_norm:.6f}")
-            else:
-                self.debug_logger.log_warning("[경고] 그래디언트가 없습니다!")
-
+            print("[디버그] 디버그 모드가 비활성화되어 있습니다.")
+    
     def _check_gradient_flow(self, img1, img2, forward_flows, backward_flows):
         """
         그래디언트 흐름을 확인하는 메서드 (디버깅용)
@@ -711,7 +691,7 @@ def parse_args():
     parser.add_argument('--target_width', type=int, default=256, help='처리 후 이미지 너비')
     parser.add_argument('--convert_to_rgb', action='store_true', default=True, help='Bayer RAW를 RGB로 변환')
     parser.add_argument('--exclude_ev_minus', action='store_true', default=True, help='ev minus 프레임(인덱스 1, 2, 3) 제외')
-    parser.add_argument('--apply_pregamma', action='store_true', help='어두운 이미지 보정을 위한 pre-gamma 적용')
+    parser.add_argument('--apply_pregamma', action='store_true', default=True, help='어두운 이미지 보정을 위한 pre-gamma 적용')
     parser.add_argument('--pregamma_value', type=float, default=2.0, help='Pre-gamma 보정 값 (기본값: 2.0)')
     
     # 모델 관련 인자
