@@ -444,9 +444,9 @@ class SmoothnessLoss(nn.Module):
         # 일차 또는 이차 미분 계산
         if not self.second_order:
             # 일차 미분
-            flow_dx = self._gradient(flow, 'x')
-            flow_dy = self._gradient(flow, 'y')
-            
+        flow_dx = self._gradient(flow, 'x')
+        flow_dy = self._gradient(flow, 'y')
+        
             # 평활화 손실 계산
             if self.edge_aware and image is not None:
                 # 이미지 그라디언트 계산
@@ -462,18 +462,18 @@ class SmoothnessLoss(nn.Module):
                 weighted_flow_dy = flow_dy * weights_y
                 
                 loss = torch.mean(torch.abs(weighted_flow_dx)) + torch.mean(torch.abs(weighted_flow_dy))
-            else:
+        else:
                 # 기본 평활화 손실
                 loss = torch.mean(torch.abs(flow_dx)) + torch.mean(torch.abs(flow_dy))
         else:
             # 이차 미분 (라플라시안)
             flow_lap = self._gradient(self._gradient(flow, 'x'), 'x') + self._gradient(self._gradient(flow, 'y'), 'y')
-            
+        
             # 평활화 손실 계산
-            if self.edge_aware and image is not None:
+        if self.edge_aware and image is not None:
                 # 이미지 라플라시안
                 img_lap = self._gradient(self._gradient(image, 'x'), 'x') + self._gradient(self._gradient(image, 'y'), 'y')
-                
+            
                 # 이미지 에지 가중치 (exp(-edge_constant * gradient))
                 weights = torch.exp(-self.edge_constant * torch.mean(torch.abs(img_lap), dim=1, keepdim=True))
                 
@@ -489,7 +489,7 @@ class SmoothnessLoss(nn.Module):
         if valid_mask is not None:
             valid_pixels = torch.sum(valid_mask) + 1e-8
             loss = torch.sum(loss * valid_mask) / valid_pixels
-        
+            
         return loss
     
     def _gradient(self, tensor, direction):
@@ -517,7 +517,7 @@ class SmoothnessLoss(nn.Module):
             grad = grad / 2.0
         else:
             raise ValueError(f"알 수 없는 그라디언트 방향: {direction}")
-        
+            
         return grad
 
 
@@ -789,31 +789,31 @@ class MultiScaleUFlowLoss(nn.Module):
         # 스케일별 손실 함수
         self.uflow_losses = nn.ModuleList([
             UFlowLoss(
-                photometric_weight=photometric_weight,
-                census_weight=census_weight,
-                smoothness_weight=smoothness_weight,
-                ssim_weight=ssim_weight,
-                window_size=window_size,
-                occlusion_method=occlusion_method,
+            photometric_weight=photometric_weight,
+            census_weight=census_weight,
+            smoothness_weight=smoothness_weight,
+            ssim_weight=ssim_weight,
+            window_size=window_size,
+            occlusion_method=occlusion_method,
                 use_occlusion=True,
                 use_valid_mask=True,
                 second_order_smoothness=False,
-                edge_aware_smoothness=edge_weighting,
+            edge_aware_smoothness=edge_weighting,
                 edge_constant=edge_constant,
-                stop_gradient=stop_gradient,
-                bidirectional=bidirectional
-            )
+            stop_gradient=stop_gradient,
+            bidirectional=bidirectional
+        )
             for _ in range(5)  # 5개의 피라미드 레벨
         ])
     
     def _create_image_pyramid(self, image, num_scales):
         """
         이미지 피라미드 생성
-        
+
         Args:
             image (torch.Tensor): 입력 이미지 [B, C, H, W]
             num_scales (int): 피라미드 레벨 수
-            
+
         Returns:
             list: 다양한 크기의 이미지 리스트
         """
@@ -835,11 +835,11 @@ class MultiScaleUFlowLoss(nn.Module):
     def _create_mask_pyramid(self, mask, num_scales):
         """
         마스크 피라미드 생성
-        
+
         Args:
             mask (torch.Tensor): 입력 마스크 [B, 1, H, W]
             num_scales (int): 피라미드 레벨 수
-            
+
         Returns:
             list: 다양한 크기의 마스크 리스트
         """
