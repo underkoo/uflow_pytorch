@@ -444,9 +444,9 @@ class SmoothnessLoss(nn.Module):
         # 일차 또는 이차 미분 계산
         if not self.second_order:
             # 일차 미분
-        flow_dx = self._gradient(flow, 'x')
-        flow_dy = self._gradient(flow, 'y')
-        
+            flow_dx = self._gradient(flow, 'x')
+            flow_dy = self._gradient(flow, 'y')
+            
             # 평활화 손실 계산
             if self.edge_aware and image is not None:
                 # 이미지 그라디언트 계산
@@ -462,7 +462,7 @@ class SmoothnessLoss(nn.Module):
                 weighted_flow_dy = flow_dy * weights_y
                 
                 loss = torch.mean(torch.abs(weighted_flow_dx)) + torch.mean(torch.abs(weighted_flow_dy))
-        else:
+            else:
                 # 기본 평활화 손실
                 loss = torch.mean(torch.abs(flow_dx)) + torch.mean(torch.abs(flow_dy))
         else:
@@ -470,7 +470,7 @@ class SmoothnessLoss(nn.Module):
             flow_lap = self._gradient(self._gradient(flow, 'x'), 'x') + self._gradient(self._gradient(flow, 'y'), 'y')
         
             # 평활화 손실 계산
-        if self.edge_aware and image is not None:
+            if self.edge_aware and image is not None:
                 # 이미지 라플라시안
                 img_lap = self._gradient(self._gradient(image, 'x'), 'x') + self._gradient(self._gradient(image, 'y'), 'y')
             
