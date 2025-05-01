@@ -123,8 +123,8 @@ class MultiFrameRawDataset(Dataset):
         frame2 = multi_frames[frame_idx2]
         
         # Convert to torch tensors and normalize to [0, 1]
-        frame1 = torch.from_numpy(frame1).float() / 65535.0
-        frame2 = torch.from_numpy(frame2).float() / 65535.0
+        frame1 = torch.from_numpy(frame1.astype(np.float32) / 65535.0)
+        frame2 = torch.from_numpy(frame2.astype(np.float32) / 65535.0)
         
         # add channel dimension
         frame1 = frame1.unsqueeze(0)

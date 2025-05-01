@@ -240,7 +240,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description='UFlow 훈련 스크립트')
     
     # 데이터 관련 인자
-    parser.add_argument('--data_dir', type=str, required=True, help='데이터셋 디렉토리')
+    parser.add_argument('--data_dir', type=str, default='/data-sets/sdp-aiip-night/dataset/S25/MPI_20250426_RG/training/', help='데이터셋 디렉토리')
     parser.add_argument('--val_data_dir', type=str, default=None, help='검증 데이터셋 디렉토리 (기본값: None, 훈련 데이터 일부 사용)')
     parser.add_argument('--target_height', type=int, default=192, help='처리 후 이미지 높이')
     parser.add_argument('--target_width', type=int, default=256, help='처리 후 이미지 너비')
@@ -271,18 +271,18 @@ def parse_args():
     parser.add_argument('--use_bidirectional', action='store_false', dest='use_bidirectional', help='양방향 손실 계산 안함')
     
     # 훈련 관련 인자
-    parser.add_argument('--train_batch_size', type=int, default=4, help='훈련 배치 크기')
-    parser.add_argument('--val_batch_size', type=int, default=1, help='검증 배치 크기')
+    parser.add_argument('--train_batch_size', type=int, default=8, help='훈련 배치 크기')
+    parser.add_argument('--val_batch_size', type=int, default=8, help='검증 배치 크기')
     parser.add_argument('--num_workers', type=int, default=4, help='데이터 로더 워커 수')
     parser.add_argument('--lr', type=float, default=1e-4, help='초기 학습률')
     parser.add_argument('--lr_decay_rate', type=float, default=0.5, help='학습률 감소 비율')
     parser.add_argument('--lr_decay_steps', type=int, default=50000, help='학습률 감소 단계')
     parser.add_argument('--weight_decay', type=float, default=0.0, help='가중치 감쇠')
-    parser.add_argument('--epochs', type=int, default=100, help='훈련 에폭 수')
+    parser.add_argument('--epochs', type=int, default=1000, help='훈련 에폭 수')
     parser.add_argument('--val_check_interval', type=float, default=1.0, help='검증 체크 간격 (에폭의 비율 또는 단계 수)')
     
     # 기타 인자
-    parser.add_argument('--checkpoint_dir', type=str, default='checkpoints', help='체크포인트 저장 디렉토리')
+    parser.add_argument('--checkpoint_dir', type=str, default='/group-volume/sdp-aiip-night/dongmin/models/mpi_training/uflow/', help='체크포인트 저장 디렉토리')
     parser.add_argument('--log_dir', type=str, default='logs', help='로그 저장 디렉토리')
     parser.add_argument('--resume', type=str, default=None, help='체크포인트에서 훈련 재개')
     parser.add_argument('--seed', type=int, default=42, help='랜덤 시드')
@@ -400,7 +400,8 @@ def main():
         accelerator='gpu' if args.gpu is not None else 'auto',
         devices=args.gpu if args.gpu is not None else 'auto',
         precision=args.precision,
-        val_check_interval=args.val_check_interval
+        val_check_interval=args.val_check_interval,
+        strategy='ddp_find_unused_parameters_true'
     )
     
     # 훈련 시작 (체크포인트에서 재개할 경우 ckpt_path 사용)
