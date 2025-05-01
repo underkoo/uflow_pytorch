@@ -561,6 +561,7 @@ class UFlowLightningModule(pl.LightningModule):
     def _save_visualizations(self, img_t1, img_t2, forward_flows, losses):
         """
         현재 상태 시각화를 저장하는 메서드
+        여러 GPU 프로세스 간 충돌 방지를 위해 rank 0에서만 저장
         
         Args:
             img_t1: 첫 번째 이미지
@@ -568,6 +569,25 @@ class UFlowLightningModule(pl.LightningModule):
             forward_flows: 순방향 광학 흐름 리스트
             losses: 손실 딕셔너리
         """
+        # 현재 프로세스의 랭크 확인
+        local_rank = 0
+        is_master = True
+        
+        # 분산 환경에서 실행 중인지 확인
+        if hasattr(self, 'trainer') and hasattr(self.trainer, 'strategy'):
+            if hasattr(self.trainer.strategy, 'local_rank'):
+                local_rank = self.trainer.strategy.local_rank
+                is_master = local_rank == 0
+            elif hasattr(self.trainer.strategy, 'root_device'):
+                local_rank = self.trainer.strategy.root_device.index
+                is_master = local_rank == 0
+        
+        # 마스터 프로세스(rank 0)에서만 시각화 저장
+        if not is_master:
+            if self.debug:
+                self.debug_logger.log_info(f"GPU {local_rank}: 시각화 건너뜀 (마스터 프로세스가 아님)")
+            return
+        
         try:
             import matplotlib.pyplot as plt
             import matplotlib
@@ -658,24 +678,30 @@ class UFlowLightningModule(pl.LightningModule):
                 plt.title('Occlusion Mask')
                 plt.axis('off')
             
-            # 시각화 저장
+            # 시각화 저장 (안전하게 저장하기 위해 파일 이름에 프로세스 랭크 정보 추가)
             plt.tight_layout()
-            plt.savefig(os.path.join(vis_dir, f'step_{self.global_step:06d}.png'))
+            
+            # 파일 경로 생성
+            viz_filename = f'step_{self.global_step:06d}.png'
+            loss_filename = f'step_{self.global_step:06d}_loss.txt'
+            
+            # 시각화 이미지 저장
+            plt.savefig(os.path.join(vis_dir, viz_filename))
             plt.close()
             
             # 손실값 기록
-            with open(os.path.join(vis_dir, f'step_{self.global_step:06d}_loss.txt'), 'w') as f:
+            with open(os.path.join(vis_dir, loss_filename), 'w') as f:
                 for key, value in losses.items():
                     if isinstance(value, torch.Tensor) and value.numel() == 1:
                         f.write(f"{key}: {value.item():.6f}\n")
             
             # 디버그 모드에서만 로그 출력
             if self.debug:
-                self.debug_logger.log_info(f"시각화 저장 완료: {vis_dir}/step_{self.global_step:06d}.png")
+                self.debug_logger.log_info(f"GPU {local_rank}(마스터): 시각화 저장 완료: {vis_dir}/{viz_filename}")
             
         except Exception as e:
             if self.debug:
-                self.debug_logger.log_error(f"시각화 생성 중 오류 발생: {str(e)}")
+                self.debug_logger.log_error(f"GPU {local_rank}: 시각화 생성 중 오류 발생: {str(e)}")
             else:
                 # 디버그 모드가 아닐 때는 조용히 오류 처리
                 pass
