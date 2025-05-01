@@ -685,8 +685,10 @@ def parse_args():
     parser = argparse.ArgumentParser(description='UFlow 훈련 스크립트')
     
     # 데이터 관련 인자
-    parser.add_argument('--data_dir', type=str, default='/data-sets/sdp-aiip-night/dataset/S25/MPI_20250426_RG/training/', help='데이터셋 디렉토리')
-    parser.add_argument('--val_data_dir', type=str, default=None, help='검증 데이터셋 디렉토리 (기본값: None, 훈련 데이터 일부 사용)')
+    parser.add_argument('--data_dir', type=str, default=None, help='데이터셋 디렉토리 (하위 호환성 유지)')
+    parser.add_argument('--val_data_dir', type=str, default=None, help='검증 데이터셋 디렉토리 (하위 호환성 유지)')
+    parser.add_argument('--train_list_path', type=str, default="train.txt", help='훈련 데이터 경로 목록 파일 (train.txt)')
+    parser.add_argument('--val_list_path', type=str, default="validation.txt", help='검증 데이터 경로 목록 파일 (validation.txt)')
     parser.add_argument('--target_height', type=int, default=192, help='처리 후 이미지 높이')
     parser.add_argument('--target_width', type=int, default=256, help='처리 후 이미지 너비')
     parser.add_argument('--convert_to_rgb', action='store_true', default=True, help='Bayer RAW를 RGB로 변환')
@@ -777,25 +779,64 @@ def main():
     # 로거 설정
     logger = TensorBoardLogger(save_dir=args.log_dir, name='uflow')
     
-    # 데이터 로더 생성
-    train_dataloader = create_dataloader(
-        data_dir=args.data_dir,
-        batch_size=args.train_batch_size,
-        num_workers=args.num_workers,
-        shuffle=True,
-        target_height=args.target_height,
-        target_width=args.target_width,
-        convert_to_rgb=args.convert_to_rgb,
-        use_augmentation=True,
-        use_photometric=True,
-        use_geometric=False,
-        exclude_ev_minus=args.exclude_ev_minus,
-        apply_pregamma=args.apply_pregamma,
-        pregamma_value=args.pregamma_value
-    )
+    # 훈련 데이터 로더 생성
+    # 새 방식(file_list_path)과 기존 방식(data_dir) 중 하나 선택
+    if args.train_list_path is not None:
+        print(f"훈련 데이터 경로 목록 사용: {args.train_list_path}")
+        train_dataloader = create_dataloader(
+            file_list_path=args.train_list_path,
+            batch_size=args.train_batch_size,
+            num_workers=args.num_workers,
+            shuffle=True,
+            target_height=args.target_height,
+            target_width=args.target_width,
+            convert_to_rgb=args.convert_to_rgb,
+            use_augmentation=True,
+            use_photometric=True,
+            use_geometric=False,
+            exclude_ev_minus=args.exclude_ev_minus,
+            apply_pregamma=args.apply_pregamma,
+            pregamma_value=args.pregamma_value
+        )
+    else:
+        print(f"훈련 데이터 디렉토리 사용: {args.data_dir}")
+        train_dataloader = create_dataloader(
+            data_dir=args.data_dir,
+            batch_size=args.train_batch_size,
+            num_workers=args.num_workers,
+            shuffle=True,
+            target_height=args.target_height,
+            target_width=args.target_width,
+            convert_to_rgb=args.convert_to_rgb,
+            use_augmentation=True,
+            use_photometric=True,
+            use_geometric=False,
+            exclude_ev_minus=args.exclude_ev_minus,
+            apply_pregamma=args.apply_pregamma,
+            pregamma_value=args.pregamma_value
+        )
     
     # 검증 데이터 로더
-    if args.val_data_dir:
+    val_dataloader = None
+    
+    # 새 방식(file_list_path)과 기존 방식(data_dir) 중 하나 선택
+    if args.val_list_path is not None:
+        print(f"검증 데이터 경로 목록 사용: {args.val_list_path}")
+        val_dataloader = create_dataloader(
+            file_list_path=args.val_list_path,
+            batch_size=args.val_batch_size,
+            num_workers=args.num_workers,
+            shuffle=False,
+            target_height=args.target_height,
+            target_width=args.target_width,
+            convert_to_rgb=args.convert_to_rgb,
+            use_augmentation=False,
+            exclude_ev_minus=args.exclude_ev_minus,
+            apply_pregamma=args.apply_pregamma,
+            pregamma_value=args.pregamma_value
+        )
+    elif args.val_data_dir is not None:
+        print(f"검증 데이터 디렉토리 사용: {args.val_data_dir}")
         val_dataloader = create_dataloader(
             data_dir=args.val_data_dir,
             batch_size=args.val_batch_size,
@@ -809,9 +850,6 @@ def main():
             apply_pregamma=args.apply_pregamma,
             pregamma_value=args.pregamma_value
         )
-    else:
-        # 훈련 데이터의 일부를 검증에 사용
-        val_dataloader = None
     
     # 모델 초기화
     model = UFlowLightningModule(
