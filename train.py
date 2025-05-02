@@ -1240,8 +1240,8 @@ def parse_args():
     parser.add_argument('--use_bidirectional', action='store_false', dest='use_bidirectional', help='양방향 손실 계산 안함')
     
     # 훈련 관련 인자
-    parser.add_argument('--train_batch_size', type=int, default=8, help='훈련 배치 크기')
-    parser.add_argument('--val_batch_size', type=int, default=8, help='검증 배치 크기')
+    parser.add_argument('--train_batch_size', type=int, default=1, help='훈련 배치 크기')
+    parser.add_argument('--val_batch_size', type=int, default=1, help='검증 배치 크기')
     parser.add_argument('--num_workers', type=int, default=4, help='데이터 로더 워커 수')
     parser.add_argument('--lr', type=float, default=1e-4, help='초기 학습률')
     parser.add_argument('--lr_decay_rate', type=float, default=0.5, help='학습률 감소 비율')
@@ -1428,7 +1428,7 @@ def main():
     )
     
     # 훈련 시작 (체크포인트에서 재개할 경우 ckpt_path 사용)
-    trainer.fit(model, train_dataloader, val_dataloader, ckpt_path=args.resume)
+    trainer.fit(model, train_dataloader, val_dataloader, ckpt_path='last')
 
 
 if __name__ == '__main__':
