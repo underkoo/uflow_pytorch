@@ -1259,7 +1259,7 @@ def parse_args():
     parser.add_argument('--shared_flow_decoder', action='store_true', help='공유 흐름 디코더 사용')
     
     # 손실 함수 관련 인자
-    parser.add_argument('--photometric_weight', type=float, default=1.0, help='포토메트릭 손실 가중치')
+    parser.add_argument('--photometric_weight', type=float, default=0.0, help='포토메트릭 손실 가중치')
     parser.add_argument('--census_weight', type=float, default=1.0, help='센서스 손실 가중치')
     parser.add_argument('--smoothness_weight', type=float, default=2.0, help='평활화 손실 가중치')
     parser.add_argument('--use_occlusion', action='store_false', dest='use_occlusion', help='가려짐 마스크 사용 안함')
@@ -1280,8 +1280,8 @@ def parse_args():
     
     # 디버깅 및 시각화 관련 인자
     parser.add_argument('--debug', action='store_true', help='디버깅 정보 출력 활성화')
-    parser.add_argument('--vis_interval', type=int, default=50, help='시각화 저장 간격 (단계 수)')
-    parser.add_argument('--debug_feature_interval', type=int, default=200, help='특징 시각화 저장 간격 (단계 수)')
+    parser.add_argument('--vis_interval', type=int, default=500, help='시각화 저장 간격 (단계 수)')
+    parser.add_argument('--debug_feature_interval', type=int, default=500, help='특징 시각화 저장 간격 (단계 수)')
     
     # 기타 인자
     parser.add_argument('--checkpoint_dir', type=str, default='/group-volume/sdp-aiip-night/dongmin/models/mpi_training/fastflownet', help='체크포인트 저장 디렉토리')
@@ -1449,6 +1449,12 @@ def main():
         vis_interval=args.vis_interval,
         debug_feature_interval=args.debug_feature_interval
     )
+
+    model_path = "ver3.0_retrained.ckpt"
+    ckpt = torch.load(model_path)
+    state_dict = ckpt['state_dict']
+    state_dict = {k.replace('fastflownet', 'model'): v for k, v in state_dict.items() if 'fastflownet' in k}
+    model.load_state_dict(state_dict, strict=True)
     
     # 훈련 설정
     trainer = pl.Trainer(
@@ -1459,7 +1465,7 @@ def main():
         devices=args.gpu if args.gpu is not None else 'auto',
         precision=args.precision,
         val_check_interval=args.val_check_interval,
-        strategy='ddp_find_unused_parameters_true'
+        strategy='ddp'
     )
     
     # 훈련 시작 (체크포인트에서 재개할 경우 ckpt_path 사용)
