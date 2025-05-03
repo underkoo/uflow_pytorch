@@ -290,31 +290,85 @@ class FastFlowNet(nn.Module):
         Returns:
             torch.Tensor: 가려짐 마스크 [B, 1, H, W], 1=가려짐 없음, 0=가려짐
         """
+        # 입력 흐름의 크기 확인
+        flow_magnitude = torch.sqrt(flow_forward[:, 0]**2 + flow_forward[:, 1]**2).mean()
+        
+        # 흐름이 너무 크면 스케일 조정 (FastFlowNet에서는 흐름에 20.0을 곱하기 때문에)
+        scale_factor = 1.0
+        if flow_magnitude > 10.0:
+            scale_factor = 5.0 / flow_magnitude
+            # 스케일 조정된 흐름 복사본 생성
+            flow_forward_scaled = flow_forward * scale_factor
+            flow_backward_scaled = flow_backward * scale_factor
+        else:
+            flow_forward_scaled = flow_forward
+            flow_backward_scaled = flow_backward
+        
+        # Occlusion 추정 시 더 적합한 값 사용
         occ_weights = {
-            'fb_abs': 1000.0,
-            'forward_collision': 1000.0,
-            'backward_zero': 1000.0
+            'fb_abs': 10.0,           # 더 낮은 값으로 조정
+            'forward_collision': 10.0, # 더 낮은 값으로 조정
+            'backward_zero': 10.0      # 더 낮은 값으로 조정
         }
         
         occ_thresholds = {
-            'fb_abs': 1.5,
-            'forward_collision': 0.4,
-            'backward_zero': 0.25
+            'fb_abs': 4.0,             # 더 높은 임계값으로 조정
+            'forward_collision': 0.3,  # 약간 낮게 조정
+            'backward_zero': 0.2       # 약간 낮게 조정
         }
         
         occ_clip_max = {
-            'fb_abs': 10.0,
-            'forward_collision': 5.0
+            'fb_abs': 10.0,            # 유지
+            'forward_collision': 5.0   # 유지
         }
         
-        return utils.estimate_occlusion_mask(
-            flow_forward, 
-            flow_backward,
-            method=method,
-            occ_weights=occ_weights,
-            occ_thresholds=occ_thresholds,
-            occ_clip_max=occ_clip_max
-        )
+        # 실험: 'wang' 방식이 잘 작동하지 않으면 'forward_backward' 방식 시도
+        if method == 'wang':
+            try:
+                occlusion_mask = utils.estimate_occlusion_mask(
+                    flow_forward_scaled, 
+                    flow_backward_scaled,
+                    method=method,
+                    occ_weights=occ_weights,
+                    occ_thresholds=occ_thresholds,
+                    occ_clip_max=occ_clip_max
+                )
+                
+                # 마스크 확인: 모두 0이거나 모두 1인 경우 문제 있음
+                if torch.mean(occlusion_mask) < 0.01 or torch.mean(occlusion_mask) > 0.99:
+                    # 다른 방법 시도
+                    method = 'forward_backward'
+                    occlusion_mask = utils.estimate_occlusion_mask(
+                        flow_forward_scaled, 
+                        flow_backward_scaled,
+                        method=method,
+                        occ_weights=occ_weights,
+                        occ_thresholds=occ_thresholds,
+                        occ_clip_max=occ_clip_max
+                    )
+            except Exception as e:
+                # 오류 발생 시 'forward_backward' 방식으로 폴백
+                print(f"Wang 방식 occlusion 계산 오류, forward_backward 방식으로 대체: {str(e)}")
+                method = 'forward_backward'
+                occlusion_mask = utils.estimate_occlusion_mask(
+                    flow_forward_scaled, 
+                    flow_backward_scaled,
+                    method=method,
+                    occ_weights=occ_weights,
+                    occ_thresholds=occ_thresholds,
+                    occ_clip_max=occ_clip_max
+                )
+        else:
+            occlusion_mask = utils.estimate_occlusion_mask(
+                flow_forward_scaled, 
+                flow_backward_scaled,
+                method=method,
+                occ_weights=occ_weights,
+                occ_thresholds=occ_thresholds,
+                occ_clip_max=occ_clip_max
+            )
+        
+        return occlusion_mask
     
     def warp_image(self, img, flow):
         """
