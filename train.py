@@ -657,6 +657,7 @@ class UFlowLightningModule(pl.LightningModule):
                  use_valid_mask: bool = True,
                  use_stop_gradient: bool = True,
                  use_bidirectional: bool = True,
+                 occlusion_method: str = 'wang',  # 추가: occlusion 계산 방식
                  
                  # 훈련 매개변수
                  lr: float = 1e-4,
@@ -700,6 +701,7 @@ class UFlowLightningModule(pl.LightningModule):
             use_valid_mask: 유효 영역 마스크 사용 여부
             use_stop_gradient: 그래디언트 흐름 제어 사용 여부
             use_bidirectional: 양방향 손실 계산 여부
+            occlusion_method: 가려짐 계산 방식
             
             # 훈련 매개변수
             lr: 초기 학습률
@@ -750,7 +752,7 @@ class UFlowLightningModule(pl.LightningModule):
             smoothness_weight=smoothness_weight,
             ssim_weight=0.0,
             window_size=7,
-            occlusion_method='wang',
+            occlusion_method=occlusion_method,  # 여기서 인자 사용
             edge_weighting=True,
             stop_gradient=use_stop_gradient,
             bidirectional=use_bidirectional
@@ -1262,6 +1264,7 @@ def parse_args():
     parser.add_argument('--photometric_weight', type=float, default=0.0, help='포토메트릭 손실 가중치')
     parser.add_argument('--census_weight', type=float, default=1.0, help='센서스 손실 가중치')
     parser.add_argument('--smoothness_weight', type=float, default=2.0, help='평활화 손실 가중치')
+    parser.add_argument('--occlusion_method', type=str, default='wang', choices=['wang', 'brox', 'none'], help='가려짐 계산 방식 (wang, brox, none)')
     parser.add_argument('--use_occlusion', action='store_false', dest='use_occlusion', help='가려짐 마스크 사용 안함')
     parser.add_argument('--use_valid_mask', action='store_false', dest='use_valid_mask', help='유효 마스크 사용 안함')
     parser.add_argument('--use_stop_gradient', action='store_false', dest='use_stop_gradient', help='그래디언트 흐름 제어 사용 안함')
@@ -1435,6 +1438,7 @@ def main():
         use_valid_mask=args.use_valid_mask,
         use_stop_gradient=args.use_stop_gradient,
         use_bidirectional=args.use_bidirectional,
+        occlusion_method=args.occlusion_method,  # 추가된 occlusion_method 인자 전달
         
         # 훈련 매개변수
         lr=args.lr,
