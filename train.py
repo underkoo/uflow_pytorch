@@ -1264,7 +1264,9 @@ def parse_args():
     parser.add_argument('--photometric_weight', type=float, default=0.0, help='포토메트릭 손실 가중치')
     parser.add_argument('--census_weight', type=float, default=1.0, help='센서스 손실 가중치')
     parser.add_argument('--smoothness_weight', type=float, default=2.0, help='평활화 손실 가중치')
-    parser.add_argument('--occlusion_method', type=str, default='wang', choices=['wang', 'brox', 'none'], help='가려짐 계산 방식 (wang, brox, none)')
+    parser.add_argument('--occlusion_method', type=str, default='wang', 
+                        choices=['wang', 'wang4', 'brox', 'forward_backward', 'uflow', 'none'], 
+                        help='가려짐 계산 방식 (wang, wang4, brox, forward_backward, uflow, none)')
     parser.add_argument('--use_occlusion', action='store_false', dest='use_occlusion', help='가려짐 마스크 사용 안함')
     parser.add_argument('--use_valid_mask', action='store_false', dest='use_valid_mask', help='유효 마스크 사용 안함')
     parser.add_argument('--use_stop_gradient', action='store_false', dest='use_stop_gradient', help='그래디언트 흐름 제어 사용 안함')
