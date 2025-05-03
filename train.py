@@ -18,7 +18,8 @@ from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 from pytorch_lightning.loggers import TensorBoardLogger
 import utils
 
-from models import UFlow
+from PWCNet import UFlow
+from FastFlowNet import FastFlowNet
 import losses
 from dataloader import create_dataloader
 
@@ -625,9 +626,12 @@ class DebugLogger:
 
 class UFlowLightningModule(pl.LightningModule):
     """
-    UFlow 모델을 훈련하기 위한 PyTorch Lightning 모듈
+    광학 흐름 모델을 훈련하기 위한 PyTorch Lightning 모듈
     """
     def __init__(self, 
+                 # 모델 선택 매개변수
+                 model_type: str = 'uflow',  # 'uflow' 또는 'fastflownet'
+                 
                  # 모델 매개변수
                  num_channels: int = 3,
                  num_levels: int = 5,
@@ -641,6 +645,9 @@ class UFlowLightningModule(pl.LightningModule):
                  channel_multiplier: float = 1.0,
                  leaky_relu_alpha: float = 0.1,
                  shared_flow_decoder: bool = False,
+                 
+                 # FastFlowNet 전용 매개변수
+                 groups: int = 3,
                  
                  # 손실 함수 매개변수
                  photometric_weight: float = 0.0,
@@ -665,6 +672,9 @@ class UFlowLightningModule(pl.LightningModule):
                  debug_feature_interval: int = 200):
         """
         Args:
+            # 모델 선택 매개변수
+            model_type: 사용할 모델 유형 ('uflow' 또는 'fastflownet')
+            
             # 모델 매개변수
             num_channels: 입력 이미지의 채널 수
             num_levels: 피라미드 레벨 수
@@ -678,6 +688,9 @@ class UFlowLightningModule(pl.LightningModule):
             channel_multiplier: 채널 수 배수
             leaky_relu_alpha: LeakyReLU의 음수 기울기
             shared_flow_decoder: 공유 흐름 디코더 사용 여부
+            
+            # FastFlowNet 전용 매개변수
+            groups: FastFlowNet의 그룹 수
             
             # 손실 함수 매개변수
             photometric_weight: 포토메트릭 손실 가중치
@@ -706,21 +719,29 @@ class UFlowLightningModule(pl.LightningModule):
         # 하이퍼파라미터 저장
         self.save_hyperparameters()
         
+        # 모델 타입 저장
+        self.model_type = model_type
+        
         # 모델 초기화
-        self.model = UFlow(
-            num_channels=num_channels,
-            num_levels=num_levels,
-            feature_channels=feature_channels,
-            use_cost_volume=use_cost_volume,
-            max_displacement=max_displacement,
-            use_feature_warp=use_feature_warp,
-            context_channels=context_channels,
-            flow_refinement_channels=flow_refinement_channels,
-            leaky_relu_alpha=leaky_relu_alpha,
-            dropout_rate=dropout_rate,
-            channel_multiplier=channel_multiplier,
-            shared_flow_decoder=shared_flow_decoder
-        )
+        if model_type.lower() == 'uflow':
+            self.model = UFlow(
+                num_channels=num_channels,
+                num_levels=num_levels,
+                feature_channels=feature_channels,
+                use_cost_volume=use_cost_volume,
+                max_displacement=max_displacement,
+                use_feature_warp=use_feature_warp,
+                context_channels=context_channels,
+                flow_refinement_channels=flow_refinement_channels,
+                leaky_relu_alpha=leaky_relu_alpha,
+                dropout_rate=dropout_rate,
+                channel_multiplier=channel_multiplier,
+                shared_flow_decoder=shared_flow_decoder
+            )
+        elif model_type.lower() == 'fastflownet':
+            self.model = FastFlowNet(groups=groups)
+        else:
+            raise ValueError(f"지원되지 않는 모델 타입: {model_type}. 'uflow' 또는 'fastflownet'을 사용하세요.")
         
         # 손실 함수 초기화
         self.criterion = losses.MultiScaleUFlowLoss(
@@ -797,7 +818,6 @@ class UFlowLightningModule(pl.LightningModule):
         
         # 현재 스텝
         global_step = self.global_step
-        
         # 디버깅 모드에서 지정된 간격마다 모델 출력 및 그래디언트 흐름 체크
         if self.debug and self.debug_logger is not None and global_step % self.debug_feature_interval == 0:
             # 모델 출력 통계 확인
@@ -858,6 +878,7 @@ class UFlowLightningModule(pl.LightningModule):
         with torch.no_grad():
             forward_flows, backward_flows, _, _ = self.model.forward_backward_flow(img_t1, img_t2)
             
+      
             # 손실 계산
             losses = self.criterion(img_t1, img_t2, forward_flows, backward_flows)
             
@@ -1196,7 +1217,14 @@ class UFlowLightningModule(pl.LightningModule):
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='UFlow 훈련 스크립트')
+    parser = argparse.ArgumentParser(description='광학 흐름 모델 훈련 스크립트')
+    
+    # 모델 선택 인자
+    parser.add_argument('--model_type', type=str, default='fastflownet', choices=['uflow', 'fastflownet'], 
+                        help='사용할 모델 타입 (uflow 또는 fastflownet)')
+    
+    # FastFlowNet 전용 인자
+    parser.add_argument('--groups', type=int, default=3, help='FastFlowNet 그룹 수')
     
     # 데이터 관련 인자
     parser.add_argument('--data_dir', type=str, default=None, help='데이터셋 디렉토리 (하위 호환성 유지)')
@@ -1256,7 +1284,7 @@ def parse_args():
     parser.add_argument('--debug_feature_interval', type=int, default=200, help='특징 시각화 저장 간격 (단계 수)')
     
     # 기타 인자
-    parser.add_argument('--checkpoint_dir', type=str, default='/group-volume/sdp-aiip-night/dongmin/models/mpi_training/uflow/', help='체크포인트 저장 디렉토리')
+    parser.add_argument('--checkpoint_dir', type=str, default='/group-volume/sdp-aiip-night/dongmin/models/mpi_training/fastflownet', help='체크포인트 저장 디렉토리')
     parser.add_argument('--log_dir', type=str, default='logs', help='로그 저장 디렉토리')
     parser.add_argument('--resume', type=str, default=None, help='체크포인트에서 훈련 재개')
     parser.add_argument('--seed', type=int, default=42, help='랜덤 시드')
@@ -1285,9 +1313,10 @@ def main():
     seed_everything(args.seed)
     
     # 모델 체크포인트 콜백
+    model_name = args.model_type.lower()
     checkpoint_callback = ModelCheckpoint(
         dirpath=args.checkpoint_dir,
-        filename='uflow-{epoch:02d}-{val_loss:.4f}',
+        filename=f'{model_name}-{{epoch:02d}}-{{val_loss:.4f}}',
         monitor='val_loss',
         save_top_k=3,
         mode='min',
@@ -1298,7 +1327,7 @@ def main():
     lr_monitor = LearningRateMonitor(logging_interval='step')
     
     # 로거 설정
-    logger = TensorBoardLogger(save_dir=args.log_dir, name='uflow')
+    logger = TensorBoardLogger(save_dir=args.log_dir, name=model_name)
     
     # 훈련 데이터 로더 생성
     # 새 방식(file_list_path)과 기존 방식(data_dir) 중 하나 선택
@@ -1378,6 +1407,9 @@ def main():
     
     # 모델 초기화
     model = UFlowLightningModule(
+        # 모델 선택 매개변수
+        model_type=args.model_type,
+        
         # 모델 매개변수
         num_channels=args.num_channels,
         num_levels=args.num_levels,
@@ -1391,6 +1423,9 @@ def main():
         channel_multiplier=args.channel_multiplier,
         leaky_relu_alpha=args.leaky_relu_alpha,
         shared_flow_decoder=args.shared_flow_decoder,
+        
+        # FastFlowNet 전용 매개변수
+        groups=args.groups,
         
         # 손실 함수 매개변수
         photometric_weight=args.photometric_weight,

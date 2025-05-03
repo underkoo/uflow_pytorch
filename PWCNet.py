@@ -663,6 +663,11 @@ if __name__ == "__main__":
     for i, flow in enumerate(flows):
         print(f"레벨 {i} 흐름 크기: {flow.shape}")
     
+    # 특징 피라미드 크기 출력
+    print(f"\n특징 피라미드 레벨 수: {len(fp1)}")
+    for i, (feat1, feat2) in enumerate(zip(fp1, fp2)):
+        print(f"레벨 {i} 특징 맵 크기: {feat1.shape}, {feat2.shape}")
+    
     # 양방향 흐름 테스트
     with torch.no_grad():
         forward_flows, backward_flows, _, _ = model.forward_backward_flow(img1, img2)
