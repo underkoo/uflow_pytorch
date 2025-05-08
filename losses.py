@@ -388,17 +388,22 @@ class SmoothnessLoss(nn.Module):
     
     광학 흐름의 공간적 평활함을 촉진하는 손실 함수
     """
-    def __init__(self, edge_aware=True, second_order=False, edge_constant=150.0):
+    def __init__(self, edge_aware=True, second_order=False, edge_constant=150.0, 
+                 edge_weighting='exponential', smoothness_at_level=2):
         """
         Args:
             edge_aware (bool): 이미지 에지를 고려한 평활화 여부
             second_order (bool): 이차 미분 사용 여부 (일차 미분보다 더 강한 평활화)
             edge_constant (float): 에지 가중치 계산에 사용되는 상수
+            edge_weighting (str): 에지 가중치 계산 방식 ('gaussian' 또는 'exponential')
+            smoothness_at_level (int): 평활화를 계산할 피라미드 레벨
         """
         super(SmoothnessLoss, self).__init__()
         self.edge_aware = edge_aware
         self.second_order = second_order
         self.edge_constant = edge_constant
+        self.edge_weighting = edge_weighting
+        self.smoothness_at_level = smoothness_at_level
     
     def forward(self, flow, image=None, valid_mask=None):
         """
@@ -412,84 +417,82 @@ class SmoothnessLoss(nn.Module):
         Returns:
             torch.Tensor: 평활화 손실 (스칼라)
         """
-        # 일차 또는 이차 미분 계산
         if not self.second_order:
             # 일차 미분
-            flow_dx = self._gradient(flow, 'x')
-            flow_dy = self._gradient(flow, 'y')
+            flow_gx = self._gradient(flow, 'x')
+            flow_gy = self._gradient(flow, 'y')
             
-            # 평활화 손실 계산
             if self.edge_aware and image is not None:
-                # 이미지 그라디언트 계산
-                img_dx = self._gradient(image, 'x')
-                img_dy = self._gradient(image, 'y')
+                # 이미지 그라디언트
+                img_gx = self._gradient(image, 'x')
+                img_gy = self._gradient(image, 'y')
                 
-                # 이미지 에지 가중치 (exp(-edge_constant * gradient))
-                weights_x = torch.exp(-self.edge_constant * torch.mean(torch.abs(img_dx), dim=1, keepdim=True))
-                weights_y = torch.exp(-self.edge_constant * torch.mean(torch.abs(img_dy), dim=1, keepdim=True))
+                # 이미지 에지 가중치
+                if self.edge_weighting == 'gaussian':
+                    weights_x = torch.exp(-self.edge_constant * torch.mean(torch.abs(img_gx), dim=1, keepdim=True)**2)
+                    weights_y = torch.exp(-self.edge_constant * torch.mean(torch.abs(img_gy), dim=1, keepdim=True)**2)
+                else:  # exponential
+                    weights_x = torch.exp(-self.edge_constant * torch.mean(torch.abs(img_gx), dim=1, keepdim=True))
+                    weights_y = torch.exp(-self.edge_constant * torch.mean(torch.abs(img_gy), dim=1, keepdim=True))
                 
                 # 에지 가중치 적용
-                weighted_flow_dx = flow_dx * weights_x
-                weighted_flow_dy = flow_dy * weights_y
+                weighted_flow_gx = flow_gx * weights_x
+                weighted_flow_gy = flow_gy * weights_y
                 
-                loss = torch.mean(torch.abs(weighted_flow_dx)) + torch.mean(torch.abs(weighted_flow_dy))
+                loss = (torch.mean(torch.abs(weighted_flow_gx)) + torch.mean(torch.abs(weighted_flow_gy))) / 2.0
             else:
-                # 기본 평활화 손실
-                loss = torch.mean(torch.abs(flow_dx)) + torch.mean(torch.abs(flow_dy))
+                # 기본 일차 평활화 손실
+                loss = (torch.mean(torch.abs(flow_gx)) + torch.mean(torch.abs(flow_gy))) / 2.0
         else:
             # 이차 미분 (라플라시안)
-            flow_lap = self._gradient(self._gradient(flow, 'x'), 'x') + self._gradient(self._gradient(flow, 'y'), 'y')
-        
-            # 평활화 손실 계산
-            if self.edge_aware and image is not None:
-                # 이미지 라플라시안
-                img_lap = self._gradient(self._gradient(image, 'x'), 'x') + self._gradient(self._gradient(image, 'y'), 'y')
+            flow_gx = self._gradient(flow, 'x')
+            flow_gy = self._gradient(flow, 'y')
+            flow_gxx = self._gradient(flow_gx, 'x')
+            flow_gyy = self._gradient(flow_gy, 'y')
             
-                # 이미지 에지 가중치 (exp(-edge_constant * gradient))
-                weights = torch.exp(-self.edge_constant * torch.mean(torch.abs(img_lap), dim=1, keepdim=True))
+            if self.edge_aware and image is not None:
+                # 이미지 그라디언트
+                img_gx = self._gradient(image, 'x')
+                img_gy = self._gradient(image, 'y')
+                
+                # 이미지 에지 가중치
+                if self.edge_weighting == 'gaussian':
+                    weights_xx = torch.exp(-self.edge_constant * torch.mean(torch.abs(img_gx), dim=1, keepdim=True)**2)
+                    weights_yy = torch.exp(-self.edge_constant * torch.mean(torch.abs(img_gy), dim=1, keepdim=True)**2)
+                else:  # exponential
+                    weights_xx = torch.exp(-self.edge_constant * torch.mean(torch.abs(img_gx), dim=1, keepdim=True))
+                    weights_yy = torch.exp(-self.edge_constant * torch.mean(torch.abs(img_gy), dim=1, keepdim=True))
+                
+                # 가중치 크기 조정
+                weights_xx = weights_xx[:, :, :, :-1]  # x 방향으로 한 픽셀 줄임
+                weights_yy = weights_yy[:, :, :-1, :]  # y 방향으로 한 픽셀 줄임
                 
                 # 에지 가중치 적용
-                weighted_flow_lap = flow_lap * weights
+                weighted_flow_gxx = flow_gxx * weights_xx
+                weighted_flow_gyy = flow_gyy * weights_yy
                 
-                loss = torch.mean(torch.abs(weighted_flow_lap))
+                loss = (torch.mean(torch.abs(weighted_flow_gxx)) + torch.mean(torch.abs(weighted_flow_gyy))) / 2.0
             else:
                 # 기본 이차 평활화 손실
-                loss = torch.mean(torch.abs(flow_lap))
+                loss = (torch.mean(torch.abs(flow_gxx)) + torch.mean(torch.abs(flow_gyy))) / 2.0
         
-        # 유효 마스크 적용 (선택적)
-        if valid_mask is not None:
-            valid_pixels = torch.sum(valid_mask) + 1e-8
-            loss = torch.sum(loss * valid_mask) / valid_pixels
-            
         return loss
     
-    def _gradient(self, tensor, direction):
+    def _gradient(self, x, direction):
         """
-        텐서의 공간 그라디언트 계산
+        이미지 또는 플로우의 그라디언트 계산
         
         Args:
-            tensor (torch.Tensor): 그라디언트를 계산할 텐서 [B, C, H, W]
+            x (torch.Tensor): 입력 텐서 [B, C, H, W]
             direction (str): 그라디언트 방향 ('x' 또는 'y')
             
         Returns:
-            torch.Tensor: 그라디언트 [B, C, H, W]
+            torch.Tensor: 그라디언트 [B, C, H-1, W-1]
         """
-        B, C, H, W = tensor.shape
-        
         if direction == 'x':
-            # x 방향 그라디언트
-            tensor_pad = F.pad(tensor, (1, 1, 0, 0), mode='replicate')
-            grad = tensor_pad[:, :, :, 2:] - tensor_pad[:, :, :, :-2]
-            grad = grad / 2.0
-        elif direction == 'y':
-            # y 방향 그라디언트
-            tensor_pad = F.pad(tensor, (0, 0, 1, 1), mode='replicate')
-            grad = tensor_pad[:, :, 2:, :] - tensor_pad[:, :, :-2, :]
-            grad = grad / 2.0
-        else:
-            raise ValueError(f"알 수 없는 그라디언트 방향: {direction}")
-            
-        return grad
+            return x[:, :, :, :-1] - x[:, :, :, 1:]
+        else:  # 'y'
+            return x[:, :, :-1, :] - x[:, :, 1:, :]
 
 
 class UFlowLoss(nn.Module):
@@ -929,6 +932,9 @@ class MultiScaleUFlowLoss(nn.Module):
 
 # 테스트 코드
 if __name__ == "__main__":
+
+    from pytorch_lightning import seed_everything
+    seed_everything(42)
     # 테스트 데이터 생성
     batch_size = 2
     channels = 3
