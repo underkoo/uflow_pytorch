@@ -3,7 +3,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 import utils
 
-
+def abs_robust_loss(diff, eps=0.01, q=0.4):
+  """The so-called robust loss used by DDFlow."""
+  return torch.pow((torch.abs(diff) + eps), q)
+  
 class OcclusionMask(nn.Module):
     """
     광학 흐름에서 가려짐(occlusion) 영역을 탐지하는 모듈
@@ -305,7 +308,7 @@ class CensusLoss(nn.Module):
     
     지역적 패턴 변화에 강인한 손실 함수
     """
-    def __init__(self, patch_size=3, use_occlusion_mask=True):
+    def __init__(self, patch_size=7, use_occlusion_mask=True):
         """
         Args:
             patch_size (int): Census 변환 패치 크기 (홀수여야 함)
@@ -334,33 +337,13 @@ class CensusLoss(nn.Module):
         """
         B, C, H, W = img1.shape
         
-        # 그레이스케일 변환 (이미지가 다중 채널인 경우)
-        if C > 1:
-            img1_gray = 0.299 * img1[:, 0:1] + 0.587 * img1[:, 1:2] + 0.114 * img1[:, 2:3]
-            img2_warped_gray = 0.299 * img2_warped[:, 0:1] + 0.587 * img2_warped[:, 1:2] + 0.114 * img2_warped[:, 2:3]
-        else:
-            img1_gray = img1
-            img2_warped_gray = img2_warped
-        
-        # 유효 영역 패딩 계산
-        pad = self.half_patch
-        
-        # 손실 저장을 위한 텐서
-        loss = torch.zeros((B, 1, H, W), device=img1.device)
-        
         # 패치 기반 Census 변환 및 해밍 거리 계산
-        census1 = self._compute_census_transform(img1_gray)
-        census2 = self._compute_census_transform(img2_warped_gray)
+        census1 = self._compute_census_transform(img1, self.patch_size)
+        census2 = self._compute_census_transform(img2_warped, self.patch_size)
         
-        # 해밍 거리 계산 (XOR 비트 개수 세기)
-        hamming_dist = torch.zeros_like(census1[:, 0:1])
-        
-        for i in range(census1.size(1)):
-            hamming_dist += (census1[:, i:i+1] != census2[:, i:i+1]).float()
-        
-        # 정규화 (최대 거리는 (patch_size^2 - 1)로 나누기)
-        norm_factor = float(self.patch_size * self.patch_size - 1)
-        loss = hamming_dist / norm_factor
+        hamming_bhw1 = self._soft_hamming(census1, census2)
+
+        loss = abs_robust_loss(hamming_bhw1)
         
         # 마스크 적용
         if self.use_occlusion_mask and occlusion_mask is not None:
@@ -371,45 +354,33 @@ class CensusLoss(nn.Module):
             
         return loss
     
-    def _compute_census_transform(self, img):
-        """
-        Census 변환 계산
+    def _compute_census_transform(self, image, patch_size):
+        """PyTorch 구현의 Census transform"""
+        # RGB to grayscale 변환
+        if image.shape[1] == 3:
+            intensities = (0.299 * image[:, 0:1] + 0.587 * image[:, 1:2] + 0.114 * image[:, 2:3]) * 255
+        else:
+            intensities = image * 255
+        # Identity kernel 생성 (PyTorch 컨볼루션에 맞게 채널 수 조정)
+        kernel = torch.eye(patch_size * patch_size).view(
+            1, 1, patch_size, patch_size, patch_size * patch_size
+        ).permute(4, 0, 1, 2, 3).reshape(
+            patch_size * patch_size, 1, patch_size, patch_size
+        ).to(image.device)
         
-        Args:
-            img (torch.Tensor): 입력 이미지 [B, 1, H, W]
-            
-        Returns:
-            torch.Tensor: Census 변환 [B, (patch_size^2-1), H, W]
-        """
-        B, C, H, W = img.shape
+        # 컨볼루션 수행
+        neighbors = F.conv2d(intensities, kernel, padding='same')
         
-        # 패치 추출을 위한 패딩
-        pad = self.half_patch
-        img_padded = F.pad(img, (pad, pad, pad, pad), mode='replicate')
+        # 차이 계산 및 정규화
+        diff = neighbors - intensities.repeat(1, patch_size * patch_size, 1, 1)
+        diff_norm = diff / torch.sqrt(0.81 + diff**2)
         
-        # 중앙 픽셀
-        center = img
-        
-        # Census 비트 저장 텐서
-        census = torch.zeros((B, self.patch_size * self.patch_size - 1, H, W), device=img.device)
-        
-        # 패치 내의 각 위치에서 중앙과 비교
-        idx = 0
-        for i in range(self.patch_size):
-            for j in range(self.patch_size):
-                if i == self.half_patch and j == self.half_patch:
-                    # 중앙 픽셀은 건너뛰기
-                    continue
-                
-                # 인접 픽셀 추출
-                neighbor = img_padded[:, :, i:i+H, j:j+W]
-                
-                # Census 비트 계산 (1: 이웃 > 중앙, 0: 이웃 <= 중앙)
-                census[:, idx:idx+1] = (neighbor > center).float()
-                idx += 1
-        
-        return census
+        return diff_norm
 
+    def _soft_hamming(self, a_bhwk, b_bhwk, thresh=.1):
+        sq_dist_bhwk = torch.square(a_bhwk - b_bhwk)
+        soft_thresh_dist_bhwk = sq_dist_bhwk / (thresh + sq_dist_bhwk)
+        return torch.sum(soft_thresh_dist_bhwk, dim=1, keepdim=True)
 
 class SmoothnessLoss(nn.Module):
     """
