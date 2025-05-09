@@ -154,11 +154,10 @@ class PhotometricLoss(nn.Module):
     
     와핑된 이미지와 타겟 이미지 간의 차이를 측정
     """
-    def __init__(self, epsilon=0.01, use_occlusion_mask=True, alpha=0.85, ssim_window_size=11):
+    def __init__(self, epsilon=0.01, alpha=0.85, ssim_window_size=11):
         """
         Args:
             epsilon (float): Charbonnier 손실 함수의 안정성 파라미터
-            use_occlusion_mask (bool): 가려짐 마스크 사용 여부
             alpha (float): L1과 SSIM 손실 간의 가중치 (alpha * L1 + (1-alpha) * SSIM)
             ssim_window_size (int): SSIM 계산에 사용할 윈도우 크기 (홀수여야 함)
         """
@@ -166,11 +165,10 @@ class PhotometricLoss(nn.Module):
         assert ssim_window_size % 2 == 1, "SSIM 윈도우 크기는 홀수여야 합니다"
         
         self.epsilon = epsilon
-        self.use_occlusion_mask = use_occlusion_mask
         self.alpha = alpha
         self.ssim_window_size = ssim_window_size
     
-    def forward(self, img1, img2_warped, occlusion_mask=None, valid_mask=None):
+    def forward(self, img1, img2_warped):
         """
         Photometric 손실 계산
         
@@ -192,13 +190,6 @@ class PhotometricLoss(nn.Module):
         
         # L1과 SSIM 손실 조합
         loss = self.alpha * l1_loss + (1 - self.alpha) * ssim_loss
-        
-        # 마스크 적용
-        if self.use_occlusion_mask and occlusion_mask is not None:
-            loss = loss * occlusion_mask
-        
-        if valid_mask is not None:
-            loss = loss * valid_mask
             
         return loss
     
@@ -308,7 +299,7 @@ class CensusLoss(nn.Module):
     
     지역적 패턴 변화에 강인한 손실 함수
     """
-    def __init__(self, patch_size=7, use_occlusion_mask=True):
+    def __init__(self, patch_size=7):
         """
         Args:
             patch_size (int): Census 변환 패치 크기 (홀수여야 함)
@@ -317,12 +308,11 @@ class CensusLoss(nn.Module):
         super(CensusLoss, self).__init__()
         assert patch_size % 2 == 1, "패치 크기는 홀수여야 합니다"
         self.patch_size = patch_size
-        self.use_occlusion_mask = use_occlusion_mask
         
         # 패치 중앙 인덱스
         self.half_patch = patch_size // 2
     
-    def forward(self, img1, img2_warped, occlusion_mask=None, valid_mask=None):
+    def forward(self, img1, img2_warped):
         """
         Census 손실 계산
         
@@ -342,15 +332,7 @@ class CensusLoss(nn.Module):
         census2 = self._compute_census_transform(img2_warped, self.patch_size)
         
         hamming_bhw1 = self._soft_hamming(census1, census2)
-
         loss = abs_robust_loss(hamming_bhw1)
-        
-        # 마스크 적용
-        if self.use_occlusion_mask and occlusion_mask is not None:
-            loss = loss * occlusion_mask
-        
-        if valid_mask is not None:
-            loss = loss * valid_mask
             
         return loss
     
@@ -405,14 +387,13 @@ class SmoothnessLoss(nn.Module):
         self.edge_weighting = edge_weighting
         self.smoothness_at_level = smoothness_at_level
     
-    def forward(self, flow, image=None, valid_mask=None):
+    def forward(self, flow, image=None):
         """
         평활화 손실 계산
         
         Args:
             flow (torch.Tensor): 광학 흐름 [B, 2, H, W]
             image (torch.Tensor, optional): 참조 이미지 [B, C, H, W], edge_aware=True일 때 사용
-            valid_mask (torch.Tensor, optional): 유효 영역 마스크 [B, 1, H, W]
             
         Returns:
             torch.Tensor: 평활화 손실 (스칼라)
@@ -547,8 +528,8 @@ class UFlowLoss(nn.Module):
         self.bidirectional = bidirectional
         
         self.occlusion_mask = OcclusionMask(method=occlusion_method)
-        self.photometric_loss = PhotometricLoss(use_occlusion_mask=use_occlusion, alpha=ssim_weight, ssim_window_size=window_size)
-        self.census_loss = CensusLoss(use_occlusion_mask=use_occlusion)
+        self.photometric_loss = PhotometricLoss(alpha=ssim_weight, ssim_window_size=window_size)
+        self.census_loss = CensusLoss()
         self.smoothness_loss = SmoothnessLoss(edge_aware=edge_aware_smoothness, second_order=second_order_smoothness, edge_constant=edge_constant)
     
     def forward(self, 
@@ -646,43 +627,40 @@ class UFlowLoss(nn.Module):
         img_tgt_warped = self._warp_image(img_tgt, flow)
         
         # stop-gradient 적용 - 와핑된 이미지 그래디언트가 흐름 네트워크로 직접 전파되지 않도록 함
-        # 이미지만 디태치하여 흐름에 대한 그래디언트는 보존
         if self.stop_gradient:
-            # 원본 흐름에서 와핑된 이미지의 그래디언트를 분리
             img_tgt_warped = img_tgt_warped.detach()
         
         # 각 손실 함수 계산
-        # 이미지와 마스크에 대한 그래디언트만 계산, 흐름에 대한 그래디언트는 photometric과 census에서 제외
-        photometric = self.photometric_loss(img_src, img_tgt_warped, occlusion_mask, valid_mask)
-        census = self.census_loss(img_src, img_tgt_warped, occlusion_mask, valid_mask)
-        
-        # smoothness 손실은 흐름에 대한 그래디언트를 포함
-        smoothness = self.smoothness_loss(flow, img_src, valid_mask)
+        photometric = self.photometric_loss(img_src, img_tgt_warped)
+        census = self.census_loss(img_src, img_tgt_warped)
+        smoothness = self.smoothness_loss(flow, img_src)
         
         # 손실 가중치 계산 (영역별 다른 가중치 적용 가능)
         weights = torch.ones_like(valid_mask)
         if self.stop_gradient:
             weights = weights.detach()
         
-        # 손실 평균 계산
+        # tensorflow 구현과 동일한 방식으로 loss 정규화
         if valid_mask is not None and torch.sum(valid_mask) > 0:
             weighted_mask = weights * valid_mask
             if self.use_occlusion and occlusion_mask is not None:
                 weighted_mask = weighted_mask * occlusion_mask
             
             # 정규화 팩터를 그래디언트로부터 분리
-            norm_factor = torch.sum(weighted_mask) + 1e-8
+            norm_factor = torch.sum(weighted_mask) + 1e-16
             if self.stop_gradient:
                 norm_factor = norm_factor.detach()
                 
             flow_consistency_loss = torch.sum(photometric * weighted_mask) / norm_factor
+            census_loss = torch.sum(census * weighted_mask) / norm_factor
         else:
             flow_consistency_loss = torch.mean(photometric)
+            census_loss = torch.mean(census)
         
         # 총 손실 (가중치 적용)
         total_loss = (
             self.photometric_weight * flow_consistency_loss +
-            self.census_weight * torch.mean(census) +
+            self.census_weight * census_loss +
             self.smoothness_weight * torch.mean(smoothness)
         )
         
@@ -690,7 +668,7 @@ class UFlowLoss(nn.Module):
         loss_dict = {
             'total_loss': total_loss,
             'photometric_loss': flow_consistency_loss,
-            'census_loss': torch.mean(census),
+            'census_loss': census_loss,
             'smoothness_loss': torch.mean(smoothness)
         }
         
