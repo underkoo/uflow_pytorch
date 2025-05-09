@@ -564,11 +564,6 @@ class UFlowLoss(nn.Module):
         if valid_mask is None and self.use_valid_mask:
             # 기본 유효 마스크는 모든 픽셀이 유효
             valid_mask = torch.ones((img1.shape[0], 1, img1.shape[2], img1.shape[3]), device=img1.device)
-            
-            # stop-gradient 적용
-            if self.stop_gradient:
-                valid_mask = valid_mask.detach()
-        
         # 순방향 손실 계산
         forward_loss_dict = self._compute_unidirectional_loss(
             img1_norm, img2_norm, flow_forward, flow_backward, valid_mask, "forward"
@@ -610,25 +605,23 @@ class UFlowLoss(nn.Module):
         Returns:
             dict: 손실 딕셔너리
         """
-        # 광학 흐름 디태치 (TensorFlow의 stop_gradient와 같은 역할)
-        flow_for_occlusion = flow.detach() if self.stop_gradient else flow
-        flow_opposite_for_occlusion = flow_opposite.detach() if self.stop_gradient and flow_opposite is not None else flow_opposite
-        
         # 가려짐 마스크 계산
         occlusion_mask = None
         if self.use_occlusion and flow_opposite is not None:
-            occlusion_mask = self.occlusion_mask(flow_for_occlusion, flow_opposite_for_occlusion)
+            occlusion_mask = self.occlusion_mask(flow, flow_opposite)
             
-            # stop-gradient 적용 - occlusion 마스크의 그래디언트가 네트워크에 영향을 미치지 않도록 함
-            if self.stop_gradient:
-                occlusion_mask = occlusion_mask.detach()
-        
         # 와핑된 이미지 계산 (flow 그래디언트는 유지)
         img_tgt_warped = self._warp_image(img_tgt, flow)
         
-        # stop-gradient 적용 - 와핑된 이미지 그래디언트가 흐름 네트워크로 직접 전파되지 않도록 함
-        if self.stop_gradient:
-            img_tgt_warped = img_tgt_warped.detach()
+        # 와핑된 좌표에 대한 유효성 마스크 계산
+        B, _, H, W = flow.shape
+        grid_y, grid_x = torch.meshgrid(
+            torch.linspace(0, H-1, H, device=flow.device),
+            torch.linspace(0, W-1, W, device=flow.device)
+        )
+        grid = torch.stack([grid_x, grid_y]).unsqueeze(0).repeat(B, 1, 1, 1)
+        warped_coords = grid + flow
+        invalid_mask = utils.mask_invalid(warped_coords)
         
         # 각 손실 함수 계산
         photometric = self.photometric_loss(img_src, img_tgt_warped)
@@ -636,26 +629,23 @@ class UFlowLoss(nn.Module):
         smoothness = self.smoothness_loss(flow, img_src)
         
         # 손실 가중치 계산 (영역별 다른 가중치 적용 가능)
-        weights = torch.ones_like(valid_mask)
-        if self.stop_gradient:
-            weights = weights.detach()
+        weights = torch.ones_like(valid_mask) if valid_mask is not None else torch.ones((B, 1, H, W), device=flow.device)
         
         # tensorflow 구현과 동일한 방식으로 loss 정규화
-        if valid_mask is not None and torch.sum(valid_mask) > 0:
-            weighted_mask = weights * valid_mask
-            if self.use_occlusion and occlusion_mask is not None:
-                weighted_mask = weighted_mask * occlusion_mask
+        weighted_mask = weights
+        if valid_mask is not None:
+            weighted_mask = weighted_mask * valid_mask
+        weighted_mask = weighted_mask * invalid_mask  # 와핑된 좌표의 유효성 마스크 적용
+        if self.use_occlusion and occlusion_mask is not None:
+            weighted_mask = weighted_mask * occlusion_mask
+        
+        if self.stop_gradient:
+            weighted_mask = weighted_mask.detach()
             
-            # 정규화 팩터를 그래디언트로부터 분리
-            norm_factor = torch.sum(weighted_mask) + 1e-16
-            if self.stop_gradient:
-                norm_factor = norm_factor.detach()
-                
-            flow_consistency_loss = torch.sum(photometric * weighted_mask) / norm_factor
-            census_loss = torch.sum(census * weighted_mask) / norm_factor
-        else:
-            flow_consistency_loss = torch.mean(photometric)
-            census_loss = torch.mean(census)
+        norm_factor = torch.sum(weighted_mask) + 1e-16
+            
+        flow_consistency_loss = torch.sum(photometric * weighted_mask) / norm_factor
+        census_loss = torch.sum(census * weighted_mask) / norm_factor
         
         # 총 손실 (가중치 적용)
         total_loss = (
@@ -674,6 +664,7 @@ class UFlowLoss(nn.Module):
         
         if occlusion_mask is not None:
             loss_dict['occlusion_mask'] = occlusion_mask
+        loss_dict['invalid_mask'] = invalid_mask  # 디버깅을 위해 invalid_mask도 반환
             
         return loss_dict
     
@@ -772,11 +763,7 @@ class MultiScaleUFlowLoss(nn.Module):
         pyramid = [image]
         
         for i in range(1, num_scales):
-            if self.stop_gradient:
-                # 이전 스케일의 그래디언트를 분리하여 새 스케일 계산
-                prev_image = pyramid[-1].detach()
-            else:
-                prev_image = pyramid[-1]
+            prev_image = pyramid[-1]
                 
             # 평균 풀링으로 다운샘플링
             down_image = F.avg_pool2d(prev_image, kernel_size=2, stride=2)
@@ -801,11 +788,7 @@ class MultiScaleUFlowLoss(nn.Module):
         pyramid = [mask]
         
         for i in range(1, num_scales):
-            if self.stop_gradient:
-                # 이전 스케일의 그래디언트를 분리하여 새 스케일 계산
-                prev_mask = pyramid[-1].detach()
-            else:
-                prev_mask = pyramid[-1]
+            prev_mask = pyramid[-1]
                 
             # 최대 풀링으로 다운샘플링 (마스크에서는 유효성을 보존하기 위해)
             down_mask = F.max_pool2d(prev_mask, kernel_size=2, stride=2)

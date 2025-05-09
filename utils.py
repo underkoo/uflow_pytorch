@@ -1256,73 +1256,96 @@ def compute_fb_sum_squared(flow_forward, flow_backward):
     return sum_sq
 
 
+def mask_invalid(coords):
+    """
+    이미지 범위를 벗어난 좌표를 마스킹합니다.
+    
+    Args:
+        coords (torch.Tensor): 이미지 좌표 [B, 2, H, W]
+        
+    Returns:
+        torch.Tensor: 유효한 좌표를 나타내는 마스크 [B, 1, H, W] (유효=1, 무효=0)
+    """
+    if len(coords.shape) != 4:
+        raise NotImplementedError("4D 텐서만 지원됩니다.")
+        
+    max_height = float(coords.shape[-2] - 1)
+    max_width = float(coords.shape[-1] - 1)
+    
+    # x, y 좌표가 이미지 범위 내에 있는지 확인
+    mask = torch.logical_and(
+        torch.logical_and(coords[:, 0] >= 0.0, coords[:, 0] <= max_width),
+        torch.logical_and(coords[:, 1] >= 0.0, coords[:, 1] <= max_height)
+    )
+    
+    # 마스크를 float32로 변환하고 채널 차원 추가
+    mask = mask.float().unsqueeze(1)
+    
+    return mask
+
+
 # 테스트 코드
 if __name__ == "__main__":
     import torch
     
     # 테스트 데이터 생성
     batch_size = 2
-    channels = 3
     height = 128
     width = 128
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
-    # 이미지
-    image1 = torch.rand(batch_size, channels, height, width)
-    image2 = torch.rand(batch_size, channels, height, width)
+    print("\n----- mask_invalid 테스트 -----")
     
-    # 광학 흐름 (두 방향)
-    flow_forward = torch.randn(batch_size, 2, height, width) * 5.0  # 순방향 흐름
-    flow_backward = torch.randn(batch_size, 2, height, width) * 5.0  # 역방향 흐름
+    # 1. 정상적인 좌표 테스트
+    coords_normal = torch.zeros(batch_size, 2, height, width, device=device)
+    coords_normal[:, 0] = torch.linspace(0, width-1, width, device=device).view(1, 1, -1)  # x 좌표
+    coords_normal[:, 1] = torch.linspace(0, height-1, height, device=device).view(1, -1, 1)  # y 좌표
     
-    # 그리드 생성 테스트
-    print("----- 그리드 생성 테스트 -----")
-    grid = create_grid(batch_size, height, width, device=image1.device)
-    print(f"그리드 크기: {grid.shape}")
-    print(f"그리드 범위: {grid.min().item()} ~ {grid.max().item()}")
+    mask_normal = mask_invalid(coords_normal)
+    print(f"1. 정상 좌표 마스크 비율: {mask_normal.mean().item():.4f} (1=유효, 0=무효)")
+    print(f"   - 최소 좌표: ({coords_normal[:, 0].min().item():.1f}, {coords_normal[:, 1].min().item():.1f})")
+    print(f"   - 최대 좌표: ({coords_normal[:, 0].max().item():.1f}, {coords_normal[:, 1].max().item():.1f})")
     
-    # 이미지 와핑 테스트
-    print("\n----- 이미지 와핑 테스트 -----")
-    warped_image = warp_image(image2, flow_forward)
-    print(f"와핑된 이미지 크기: {warped_image.shape}")
+    # 2. 경계값 테스트
+    coords_boundary = torch.zeros(batch_size, 2, height, width, device=device)
+    coords_boundary[:, 0] = torch.linspace(-1, width, width, device=device).view(1, 1, -1)  # x 좌표
+    coords_boundary[:, 1] = torch.linspace(-1, height, height, device=device).view(1, -1, 1)  # y 좌표
     
-    # 가려짐 마스크 테스트
-    print("\n----- 가려짐 마스크 테스트 -----")
-    occlusion_mask = estimate_occlusion_mask(flow_forward, flow_backward)
-    occlusion_ratio = torch.mean(occlusion_mask).item()
-    print(f"가려짐 마스크 비율: {occlusion_ratio:.4f} (1=가려짐 없음, 0=가려짐)")
+    mask_boundary = mask_invalid(coords_boundary)
+    print(f"\n2. 경계값 좌표 마스크 비율: {mask_boundary.mean().item():.4f}")
+    print(f"   - 최소 좌표: ({coords_boundary[:, 0].min().item():.1f}, {coords_boundary[:, 1].min().item():.1f})")
+    print(f"   - 최대 좌표: ({coords_boundary[:, 0].max().item():.1f}, {coords_boundary[:, 1].max().item():.1f})")
     
-    # 유효 마스크 테스트
-    print("\n----- 유효 마스크 테스트 -----")
-    valid_mask = compute_valid_mask(flow_forward)
-    valid_ratio = torch.mean(valid_mask).item()
-    print(f"유효 마스크 비율: {valid_ratio:.4f} (1=유효, 0=무효)")
+    # 3. 랜덤 좌표 테스트
+    coords_random = torch.rand(batch_size, 2, height, width, device=device) * (width * 1.5) - (width * 0.25)
+    mask_random = mask_invalid(coords_random)
+    print(f"\n3. 랜덤 좌표 마스크 비율: {mask_random.mean().item():.4f}")
+    print(f"   - 최소 좌표: ({coords_random[:, 0].min().item():.1f}, {coords_random[:, 1].min().item():.1f})")
+    print(f"   - 최대 좌표: ({coords_random[:, 0].max().item():.1f}, {coords_random[:, 1].max().item():.1f})")
     
-    # SSIM 테스트
-    print("\n----- SSIM 테스트 -----")
-    ssim_map = compute_ssim(image1, image2)
-    ssim_mean = torch.mean(ssim_map).item()
-    print(f"SSIM 평균: {ssim_mean:.4f} (1=완전 유사, 0=전혀 유사하지 않음)")
+    # 4. 시각화를 위한 특정 패턴 테스트
+    coords_pattern = torch.zeros(batch_size, 2, height, width, device=device)
+    # 체스 패턴처럼 유효/무효 영역 생성
+    for i in range(height):
+        for j in range(width):
+            if (i + j) % 2 == 0:
+                coords_pattern[:, 0, i, j] = j  # 유효한 x 좌표
+                coords_pattern[:, 1, i, j] = i  # 유효한 y 좌표
+            else:
+                coords_pattern[:, 0, i, j] = width + 10  # 무효한 x 좌표
+                coords_pattern[:, 1, i, j] = height + 10  # 무효한 y 좌표
     
-    # 포토메트릭 손실 테스트
-    print("\n----- 포토메트릭 손실 테스트 -----")
-    photo_loss = compute_photometric_loss(image1, image2, flow_forward)
-    print(f"포토메트릭 손실: {photo_loss.item():.4f}")
+    mask_pattern = mask_invalid(coords_pattern)
+    print(f"\n4. 패턴 좌표 마스크 비율: {mask_pattern.mean().item():.4f}")
+    print(f"   - 최소 좌표: ({coords_pattern[:, 0].min().item():.1f}, {coords_pattern[:, 1].min().item():.1f})")
+    print(f"   - 최대 좌표: ({coords_pattern[:, 0].max().item():.1f}, {coords_pattern[:, 1].max().item():.1f})")
     
-    # 흐름 합성 테스트
-    print("\n----- 흐름 합성 테스트 -----")
-    flow_ac = torch.randn(batch_size, 2, height, width) * 5.0  # A→C 흐름
-    warped_flow = warp_flow(flow_forward, flow_backward)
-    print(f"합성 흐름 크기: {warped_flow.shape}")
+    # 5. 예외 처리 테스트
+    try:
+        # 3D 텐서로 테스트
+        coords_3d = torch.zeros(batch_size, height, width, device=device)
+        mask_3d = mask_invalid(coords_3d)
+    except NotImplementedError as e:
+        print(f"\n5. 3D 텐서 예외 처리 성공: {str(e)}")
     
-    # 흐름 워핑 손실 테스트
-    print("\n----- 흐름 워핑 손실 테스트 -----")
-    warp_loss = compute_flow_warp_loss(flow_forward, flow_backward, flow_ac)
-    print(f"흐름 워핑 손실: {warp_loss.item():.4f}")
-    
-    # 흐름 일관성 손실 테스트
-    print("\n----- 흐름 일관성 손실 테스트 -----")
-    consistency_loss = compute_flow_consistency_loss(flow_forward, flow_backward)
-    print(f"흐름 일관성 손실: {consistency_loss.item():.4f}")
-    
-    # 모든 테스트가 성공적으로 완료됨
-    print("\n모든 테스트가 성공적으로 완료되었습니다.") 
+    print("\n모든 mask_invalid 테스트가 완료되었습니다.") 

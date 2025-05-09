@@ -616,6 +616,172 @@ def test_occlusion_mask():
     
     return fig
 
+def verify_mask_direction(batch_size=1, height=128, width=128):
+    """
+    Occlusion mask의 방향을 검증하는 테스트
+    
+    1. 명확한 가려짐이 있는 flow 패턴 생성
+    2. 각 방법별 mask 생성 및 방향 확인
+    3. Loss 계산 시 mask 적용 방향 검증
+    """
+    print("\nOcclusion Mask Direction Test")
+    print("=" * 50)
+    
+    # 1. 명확한 가려짐이 있는 flow 패턴 생성
+    # 왼쪽에서 오른쪽으로 이동하는 물체를 시뮬레이션
+    flow_forward = torch.zeros(batch_size, 2, height, width)
+    flow_forward[:, 0, :, :-20] = 20.0  # x 방향으로 20픽셀 이동
+    
+    # 역방향 flow는 정확히 반대 방향 (약간의 불일치 추가)
+    flow_backward = torch.zeros_like(flow_forward)
+    flow_backward[:, 0, :, 20:] = -19.5  # 약간의 오차 포함
+    
+    # 2. 각 방법별 mask 생성 및 방향 확인
+    methods = ['wang', 'brox', 'uflow']
+    
+    for method in methods:
+        print(f"\n[{method} 방법]")
+        mask = utils.estimate_occlusion_mask(flow_forward, flow_backward, method=method)
+        
+        # 가려진 영역 (이론상 물체가 이동한 후의 위치)
+        occluded_region = mask[0, 0, :, -20:].mean().item()
+        visible_region = mask[0, 0, :, :-20].mean().item()
+        
+        print(f"예상 가려짐 영역의 평균 mask 값: {occluded_region:.4f}")
+        print(f"예상 비가려짐 영역의 평균 mask 값: {visible_region:.4f}")
+        
+        # 3. Loss 계산 검증
+        # 인위적인 에러가 있는 flow 생성
+        test_flow = flow_forward.clone()
+        test_flow[:, 0, :, -20:] += 10.0  # 가려진 영역에 큰 에러 추가
+        
+        # Loss 계산
+        mse = torch.nn.MSELoss(reduction='none')(test_flow, flow_forward)
+        mse = mse.mean(dim=1, keepdim=True)
+        
+        # Mask 적용 전/후 loss
+        unmasked_loss = mse.mean().item()
+        masked_loss = (mse * mask).mean().item()
+        
+        print(f"Mask 적용 전 평균 loss: {unmasked_loss:.4f}")
+        print(f"Mask 적용 후 평균 loss: {masked_loss:.4f}")
+        
+        # 시각화
+        plt.figure(figsize=(15, 5))
+        
+        plt.subplot(131)
+        plt.imshow(mask[0, 0].cpu().numpy(), cmap='RdYlBu')
+        plt.title(f'Occlusion Mask ({method})\n1=visible, 0=occluded')
+        plt.colorbar()
+        
+        plt.subplot(132)
+        plt.imshow(mse[0, 0].cpu().numpy())
+        plt.title('Original MSE Loss')
+        plt.colorbar()
+        
+        plt.subplot(133)
+        plt.imshow((mse * mask)[0, 0].cpu().numpy())
+        plt.title('Masked MSE Loss')
+        plt.colorbar()
+        
+        plt.tight_layout()
+        plt.show()
+
+def verify_gradient_flow(batch_size=1, height=128, width=128):
+    """
+    Gradient flow를 검증하는 테스트
+    
+    1. 학습 가능한 flow 생성
+    2. Forward/Backward pass 수행
+    3. Gradient 분석
+    """
+    print("\nGradient Flow Test")
+    print("=" * 50)
+    
+    # 1. 테스트 데이터 생성
+    # 학습 가능한 flow
+    flow_pred = torch.zeros(batch_size, 2, height, width, requires_grad=True)
+    flow_pred.data[:, 0, :, :-20] = 20.0  # x 방향으로 20픽셀 이동
+    
+    # 타겟 flow (ground truth)
+    flow_target = flow_pred.data.clone()
+    flow_target[:, 0, :, :-20] = 25.0  # 의도적으로 다른 값 설정
+    
+    # 역방향 flow
+    flow_backward = torch.zeros_like(flow_pred.data)
+    flow_backward[:, 0, :, 20:] = -19.5
+    
+    # 2. Loss 계산을 위한 컴포넌트들
+    uflow_loss = UFlowLoss(
+        photometric_weight=1.0,
+        census_weight=1.0,
+        smoothness_weight=0.1,
+        use_occlusion=True,  # occlusion mask 사용
+        occlusion_method='wang'
+    )
+    
+    # 이미지 생성 (간단한 패턴)
+    img1 = torch.zeros(batch_size, 3, height, width)
+    img2 = torch.zeros(batch_size, 3, height, width)
+    # 이미지에 패턴 추가
+    img1[:, 0, :, ::4] = 1.0  # 빨간색 수직 줄무늬
+    img2 = utils.warp_image(img1, flow_target)  # 타겟 flow로 와핑
+    
+    optimizer = torch.optim.Adam([flow_pred], lr=0.01)
+    
+    print("\n학습 진행 상황:")
+    for step in range(5):  # 5 스텝만 테스트
+        optimizer.zero_grad()
+        
+        # Forward pass
+        loss_dict = uflow_loss(img1, img2, flow_pred, flow_backward)
+        total_loss = loss_dict['total_loss']
+        
+        # Backward pass
+        total_loss.backward()
+        
+        # Gradient 분석
+        grad = flow_pred.grad
+        grad_visible = grad[:, :, :, :-20]  # 가려지지 않은 영역
+        grad_occluded = grad[:, :, :, -20:]  # 가려진 영역
+        
+        print(f"\nStep {step + 1}")
+        print(f"Total Loss: {total_loss.item():.6f}")
+        print(f"Gradient 통계:")
+        print(f"- 전체 평균 크기: {grad.abs().mean().item():.6f}")
+        print(f"- 가려지지 않은 영역 평균 크기: {grad_visible.abs().mean().item():.6f}")
+        print(f"- 가려진 영역 평균 크기: {grad_occluded.abs().mean().item():.6f}")
+        print(f"- gradient가 0이 아닌 비율: {(grad.abs() > 1e-6).float().mean().item():.2%}")
+        
+        if 'occlusion_mask' in loss_dict:
+            mask = loss_dict['occlusion_mask']
+            print(f"Occlusion mask 평균값: {mask.mean().item():.4f}")
+        
+        optimizer.step()
+        
+        # 시각화 (첫 번째와 마지막 스텝만)
+        if step in [0, 4]:
+            plt.figure(figsize=(15, 5))
+            
+            plt.subplot(131)
+            plt.imshow(grad[0, 0].detach().cpu().numpy())
+            plt.title(f'Gradient Map (Step {step + 1})')
+            plt.colorbar()
+            
+            plt.subplot(132)
+            if 'occlusion_mask' in loss_dict:
+                plt.imshow(mask[0, 0].detach().cpu().numpy(), cmap='RdYlBu')
+                plt.title('Occlusion Mask\n1=visible, 0=occluded')
+                plt.colorbar()
+            
+            plt.subplot(133)
+            flow_error = (flow_pred - flow_target).abs().mean(dim=1)
+            plt.imshow(flow_error[0].detach().cpu().numpy())
+            plt.title('Flow Error')
+            plt.colorbar()
+            
+            plt.tight_layout()
+            plt.show()
+
 if __name__ == "__main__":
-    fig = test_occlusion_mask()
-    plt.show() 
+    verify_gradient_flow() 
