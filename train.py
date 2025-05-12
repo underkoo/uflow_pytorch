@@ -787,7 +787,7 @@ class UFlowLightningModule(pl.LightningModule):
     def configure_optimizers(self):
         """옵티마이저 및 학습률 스케줄러 설정"""
         # 학습률 낮추기 - 시작 학습률을 1e-5로 감소
-        initial_lr = self.lr
+        initial_lr = self.lr / 100
         print(f"[옵티마이저 설정] 초기 학습률: {initial_lr}")
         
         optimizer = optim.Adam(
