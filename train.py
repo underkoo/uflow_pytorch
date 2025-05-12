@@ -22,7 +22,7 @@ from PWCNet import UFlow
 from FastFlowNet import FastFlowNet
 import losses
 from dataloader import create_dataloader
-
+from lr_schduler import CosineAnealingWarmRestarts
 
 class DebugLogger:
     """
@@ -666,7 +666,8 @@ class UFlowLightningModule(pl.LightningModule):
                  weight_decay: float = 0.0,
                  train_batch_size: int = 4,
                  val_batch_size: int = 1,
-                 
+                 epochs_decay: int = 10,
+
                  # 디버깅 매개변수
                  debug: bool = False,
                  vis_interval: int = 50,
@@ -777,6 +778,7 @@ class UFlowLightningModule(pl.LightningModule):
         
         # 디버그 로거 초기화
         self.debug_logger = None
+        self.epochs_decay = epochs_decay
     
     def forward(self, img1, img2):
         """모델 순전파"""
@@ -794,19 +796,36 @@ class UFlowLightningModule(pl.LightningModule):
             weight_decay=self.weight_decay
         )
         
-        # 학습률 스케줄러
-        lr_scheduler = optim.lr_scheduler.StepLR(
-            optimizer, 
-            step_size=self.lr_decay_steps, 
-            gamma=self.lr_decay_rate
-        )
+        # 전체 스텝 수 계산
+        total_steps = self.trainer.estimated_stepping_batches
+        num_epochs = self.trainer.max_epochs
+        
+        # 에폭당 스텝 수 계산
+        steps_per_epoch = total_steps // num_epochs
+        if total_steps % num_epochs != 0:
+            steps_per_epoch += 1
+            
+        # T_0는 epochs_decay 동안의 총 스텝 수
+        T_0 = steps_per_epoch * self.epochs_decay
+        
+        print(f"[스케줄러 설정] 에폭당 스텝 수: {steps_per_epoch}, T_0: {T_0}")
+        
+        scheduler = {
+            'scheduler': CosineAnealingWarmRestarts(
+                optimizer,
+                T_0=T_0,
+                T_mult=1,
+                eta_max=self.lr,
+                T_up=1,
+                gamma=0.5
+            ),
+            'interval': 'step',
+            'frequency': 1
+        }
         
         return {
             'optimizer': optimizer,
-            'lr_scheduler': {
-                'scheduler': lr_scheduler,
-                'interval': 'step'  # 'epoch' 또는 'step'
-            }
+            'lr_scheduler': scheduler
         }
     
     def training_step(self, batch, batch_idx):
@@ -820,6 +839,7 @@ class UFlowLightningModule(pl.LightningModule):
         
         # 현재 스텝
         global_step = self.global_step
+        
         # 디버깅 모드에서 지정된 간격마다 모델 출력 및 그래디언트 흐름 체크
         if self.debug and self.debug_logger is not None and global_step % self.debug_feature_interval == 0:
             # 모델 출력 통계 확인
@@ -842,6 +862,10 @@ class UFlowLightningModule(pl.LightningModule):
         
         # 로깅
         self.log('train_loss', total_loss, on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+        
+        # 현재 학습률 로깅
+        current_lr = self.trainer.optimizers[0].param_groups[0]['lr']
+        self.log('lr', current_lr, on_step=True, on_epoch=False, prog_bar=True, logger=True, sync_dist=True)
         
         # 개별 손실 로깅
         for key, value in losses.items():
@@ -1282,7 +1306,8 @@ def parse_args():
     parser.add_argument('--weight_decay', type=float, default=0.0, help='가중치 감쇠')
     parser.add_argument('--epochs', type=int, default=1000, help='훈련 에폭 수')
     parser.add_argument('--val_check_interval', type=float, default=1.0, help='검증 체크 간격 (에폭의 비율 또는 단계 수)')
-    
+    parser.add_argument('--epochs_decay', type=int, default=50, help='학습률 감소 에폭 수')
+
     # 디버깅 및 시각화 관련 인자
     parser.add_argument('--debug', action='store_true', help='디버깅 정보 출력 활성화')
     parser.add_argument('--vis_interval', type=int, default=500, help='시각화 저장 간격 (단계 수)')
@@ -1449,7 +1474,8 @@ def main():
         weight_decay=args.weight_decay,
         train_batch_size=args.train_batch_size,
         val_batch_size=args.val_batch_size,
-        
+        epochs_decay=args.epochs_decay,
+
         # 디버깅 매개변수
         debug=args.debug,
         vis_interval=args.vis_interval,
