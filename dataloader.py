@@ -161,7 +161,7 @@ class MultiFrameRawDataset(Dataset):
     """
     def __init__(self, file_list_path=None, data_dir=None, target_height=196, target_width=256, 
                 convert_to_rgb=True, use_augmentation=False, use_photometric=True, use_geometric=False,
-                exclude_ev_minus=True, apply_pregamma=False, pregamma_value=2.0):
+                exclude_ev_minus=True, apply_pregamma=False, pregamma_value=2.0, identity_frame_prob=0.0):
         """
         Args:
             file_list_path (str): 파일 경로 목록이 저장된 텍스트 파일
@@ -175,6 +175,7 @@ class MultiFrameRawDataset(Dataset):
             exclude_ev_minus (bool): 'ev minus' 프레임(인덱스 1, 2, 3) 제외 여부
             apply_pregamma (bool): 어두운 이미지 보정을 위한 pre-gamma 적용 여부
             pregamma_value (float): gamma 보정 값 (클수록 어두운 영역이 밝아짐)
+            identity_frame_prob (float): 동일 프레임을 선택할 확률 (0.0~1.0)
         """
         self.target_height = target_height
         self.target_width = target_width
@@ -182,6 +183,7 @@ class MultiFrameRawDataset(Dataset):
         self.exclude_ev_minus = exclude_ev_minus
         self.apply_pregamma = apply_pregamma
         self.pregamma_value = pregamma_value
+        self.identity_frame_prob = identity_frame_prob
         
         # 데이터 증강 옵션
         self.use_augmentation = use_augmentation and AUGMENTATION_AVAILABLE
@@ -208,6 +210,9 @@ class MultiFrameRawDataset(Dataset):
         
         if self.apply_pregamma:
             print(f"Pre-gamma 보정 활성화됨 (gamma = {self.pregamma_value})")
+        
+        if self.identity_frame_prob > 0:
+            print(f"동일 프레임 샘플링 활성화됨 (확률 = {self.identity_frame_prob:.2f})")
         
         # 파일 별로 seq len 다를 수 있음
     
@@ -240,8 +245,16 @@ class MultiFrameRawDataset(Dataset):
             ev_minus_indices = [1, 2, 3]  # 'ev minus' 프레임 인덱스
             available_indices = [i for i in available_indices if i not in ev_minus_indices]
         
-        # 사용 가능한 인덱스에서 랜덤하게 2개 선택
-        frame_idx1, frame_idx2 = random.sample(available_indices, 2)
+        # 동일 프레임 샘플링 확률에 따라 결정
+        use_identity_frame = random.random() < self.identity_frame_prob
+        
+        if use_identity_frame:
+            # 동일 프레임 샘플링: 사용 가능한 인덱스에서 랜덤하게 하나만 선택하고 동일하게 사용
+            frame_idx1 = random.choice(available_indices)
+            frame_idx2 = frame_idx1  # 동일한 프레임 인덱스
+        else:
+            # 기존 방식: 사용 가능한 인덱스에서 랜덤하게 2개 선택
+            frame_idx1, frame_idx2 = random.sample(available_indices, 2)
         
         # 선택된 프레임 가져오기
         frame1 = multi_frames[frame_idx1]
@@ -254,10 +267,10 @@ class MultiFrameRawDataset(Dataset):
         frame2 = torch.from_numpy(frame2.astype(np.float32) / 255.0)
         
         # pre-gamma 보정 적용 (어두운 이미지를 더 밝게 변환)
-        # if self.apply_pregamma:
-        #     # I' = I^(1/gamma), gamma > 1이면 어두운 영역이 더 밝아짐
-        #     frame1 = torch.pow(frame1, 1.0 / self.pregamma_value)
-        #     frame2 = torch.pow(frame2, 1.0 / self.pregamma_value)
+        if self.apply_pregamma:
+            # I' = I^(1/gamma), gamma > 1이면 어두운 영역이 더 밝아짐
+            frame1 = torch.pow(frame1, 1.0 / self.pregamma_value)
+            frame2 = torch.pow(frame2, 1.0 / self.pregamma_value)
         
         # add channel dimension        
         frames = torch.stack([frame1, frame2], dim=0)
@@ -290,7 +303,8 @@ class MultiFrameRawDataset(Dataset):
 def create_dataloader(file_list_path=None, data_dir=None, batch_size=32, shuffle=True, num_workers=4, 
                       target_height=196, target_width=256, convert_to_rgb=True,
                       use_augmentation=False, use_photometric=True, use_geometric=False,
-                      exclude_ev_minus=True, apply_pregamma=False, pregamma_value=2.0):
+                      exclude_ev_minus=True, apply_pregamma=False, pregamma_value=2.0,
+                      identity_frame_prob=0.0):
     """
     MultiFrameRawDataset에 대한 데이터로더 생성
     
@@ -309,6 +323,7 @@ def create_dataloader(file_list_path=None, data_dir=None, batch_size=32, shuffle
         exclude_ev_minus (bool): 'ev minus' 프레임(인덱스 1, 2, 3) 제외 여부
         apply_pregamma (bool): 어두운 이미지 보정을 위한 pre-gamma 적용 여부
         pregamma_value (float): gamma 보정 값 (기본값: 2.0)
+        identity_frame_prob (float): 동일 프레임을 선택할 확률 (0.0~1.0)
         
     Returns:
         torch.utils.data.DataLoader: 데이터로더
@@ -325,7 +340,8 @@ def create_dataloader(file_list_path=None, data_dir=None, batch_size=32, shuffle
         use_geometric=use_geometric,
         exclude_ev_minus=exclude_ev_minus,
         apply_pregamma=apply_pregamma,
-        pregamma_value=pregamma_value
+        pregamma_value=pregamma_value,
+        identity_frame_prob=identity_frame_prob
     )
     
     # 데이터로더 생성
@@ -340,7 +356,7 @@ def create_dataloader(file_list_path=None, data_dir=None, batch_size=32, shuffle
     return dataloader
 
 def test_dataloader(file_list_path=None, data_dir=None, batch_size=4, use_augmentation=False, exclude_ev_minus=True,
-                   apply_pregamma=False, pregamma_value=2.0):
+                   apply_pregamma=False, pregamma_value=2.0, identity_frame_prob=0.0):
     """
     데이터로더 테스트 및 시각화
     
@@ -352,6 +368,7 @@ def test_dataloader(file_list_path=None, data_dir=None, batch_size=4, use_augmen
         exclude_ev_minus (bool): 'ev minus' 프레임(인덱스 1, 2, 3) 제외 여부
         apply_pregamma (bool): pre-gamma 보정 적용 여부
         pregamma_value (float): gamma 보정 값 (기본값: 2.0)
+        identity_frame_prob (float): 동일 프레임을 선택할 확률 (0.0~1.0)
     """
     # 데이터 소스 확인
     if file_list_path is None and data_dir is None:
@@ -376,7 +393,8 @@ def test_dataloader(file_list_path=None, data_dir=None, batch_size=4, use_augmen
         use_geometric=False,       # 기하학적 변환 비활성화 (크기 고정이므로)
         exclude_ev_minus=exclude_ev_minus,
         apply_pregamma=apply_pregamma,
-        pregamma_value=pregamma_value
+        pregamma_value=pregamma_value,
+        identity_frame_prob=identity_frame_prob
     )
     
     # 데이터 로드
@@ -428,6 +446,7 @@ if __name__ == "__main__":
     parser.add_argument('--exclude_ev_minus', action='store_true', default=True, help='EV Minus 프레임 제외')
     parser.add_argument('--apply_pregamma', action='store_true', help='pre-gamma 보정 적용')
     parser.add_argument('--pregamma_value', type=float, default=2.0, help='gamma 보정 값')
+    parser.add_argument('--identity_frame_prob', type=float, default=0.0, help='동일 프레임 선택 확률 (0.0~1.0)')
     
     args = parser.parse_args()
     
@@ -446,7 +465,8 @@ if __name__ == "__main__":
         use_augmentation=args.augmentation,
         exclude_ev_minus=args.exclude_ev_minus,
         apply_pregamma=args.apply_pregamma,
-        pregamma_value=args.pregamma_value
+        pregamma_value=args.pregamma_value,
+        identity_frame_prob=args.identity_frame_prob
     )
     
     # 추가 테스트 (사용자가 원할 경우 활성화)
