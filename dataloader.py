@@ -234,8 +234,8 @@ class MultiFrameRawDataset(Dataset):
         
         num_frames = multi_frames.shape[0]
 
-        inv = numeric_inverse_permutation(num_frames)
-        multi_frames = multi_frames[inv]   
+        # inv = numeric_inverse_permutation(num_frames)
+        # multi_frames = multi_frames[inv]   
         
         # 'ev minus' 프레임 제외 설정
         available_indices = list(range(num_frames))
