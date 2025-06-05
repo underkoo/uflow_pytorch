@@ -1257,8 +1257,8 @@ def parse_args():
     parser.add_argument('--val_data_dir', type=str, default=None, help='검증 데이터셋 디렉토리 (하위 호환성 유지)')
     parser.add_argument('--train_list_path', type=str, default="train.txt", help='훈련 데이터 경로 목록 파일 (train.txt)')
     parser.add_argument('--val_list_path', type=str, default="validation.txt", help='검증 데이터 경로 목록 파일 (validation.txt)')
-    parser.add_argument('--target_height', type=int, default=192, help='처리 후 이미지 높이')
-    parser.add_argument('--target_width', type=int, default=256, help='처리 후 이미지 너비')
+    parser.add_argument('--target_height', type=int, default=512, help='처리 후 이미지 높이')
+    parser.add_argument('--target_width', type=int, default=512, help='처리 후 이미지 너비')
     parser.add_argument('--convert_to_rgb', action='store_true', default=True, help='Bayer RAW를 RGB로 변환')
     parser.add_argument('--exclude_ev_minus', action='store_true', default=True, help='ev minus 프레임(인덱스 1, 2, 3) 제외')
     parser.add_argument('--apply_pregamma', action='store_true', default=True, help='어두운 이미지 보정을 위한 pre-gamma 적용')
@@ -1267,7 +1267,7 @@ def parse_args():
     # 데이터 증강 관련 인자
     parser.add_argument('--use_augmentation', action='store_true', default=True, help='데이터 증강 사용')
     parser.add_argument('--use_photometric', action='store_true', default=True, help='색상 변환 증강 적용')
-    parser.add_argument('--use_geometric', action='store_true', default=False, help='기하학적 변환 증강 적용')
+    parser.add_argument('--use_geometric', action='store_true', default=True, help='기하학적 변환 증강 적용')
     parser.add_argument('--val_augmentation', action='store_true', default=False, help='검증 데이터에도 증강 적용')
     
     # 모델 관련 인자

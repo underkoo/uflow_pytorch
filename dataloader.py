@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 import random
 import torch.nn.functional as F
 import argparse
+import cv2
 
 try:
     # 새로 구현한 augmentation 모듈 임포트
@@ -61,12 +62,97 @@ def preprocess_raw_bayer(raw_image, target_height=196, target_width=256):
         rgb_image, 
         size=(target_height, target_width), 
         mode='bilinear', 
-        align_corners=False
+        align_corners=True,
+        antialias=False
     )
     
     
     return rgb_image
 
+def yuv_to_rgb_cv2(yuv_tensor):
+    """
+    cv2를 사용하여 YUV 텐서를 RGB 텐서로 변환
+    
+    Args:
+        yuv_tensor (torch.Tensor): YUV 이미지 [B, 3, H, W]
+        
+    Returns:
+        torch.Tensor: RGB 이미지 [B, 3, H, W]
+    """
+    batch_size, _, height, width = yuv_tensor.shape
+    rgb_tensor = torch.zeros_like(yuv_tensor)
+    
+    for b in range(batch_size):
+        # 텐서를 numpy 배열로 변환 (CPU로 이동)
+        yuv_np = yuv_tensor[b].permute(1, 2, 0).cpu().numpy()  # [H, W, 3]
+        
+        # YUV 값 범위 조정 (0-1 -> 0-255)
+        yuv_np = (yuv_np * 255.0).astype(np.uint8)
+        
+        # cv2.cvtColor는 YUV 이미지의 형식이 특정 형식이어야 함
+        # YUV 444 포맷으로 가정하고 변환
+        rgb_np = cv2.cvtColor(yuv_np, cv2.COLOR_YUV2RGB)
+        
+        # numpy 배열을 다시 텐서로 변환 (0-255 -> 0-1)
+        rgb_np = rgb_np.astype(np.float32) / 255.0
+        rgb_tensor[b] = torch.from_numpy(rgb_np).permute(2, 0, 1)
+    
+    return rgb_tensor
+
+def preprocess_raw_yuv(raw_image, target_height=196, target_width=256):
+    """
+    NV21 포맷의 YUV 이미지를 처리하고 RGB로 변환하는 함수
+    
+    Args:
+        raw_image (torch.Tensor): 6채널 YUV 이미지 [B, 6, H, W]
+                                 (Y0, Y1, Y2, Y3, U, V 채널 구성)
+        target_height (int): 출력 이미지의 높이 (기본값: 196)
+        target_width (int): 출력 이미지의 너비 (기본값: 256)
+        
+    Returns:
+        torch.Tensor: 3채널 RGB 이미지 [B, 3, target_height, target_width]
+    """
+    b, c, h, w = raw_image.shape
+    
+    # Y 채널 (0,1,2,3) 추출 및 pixel shuffle
+    y_channels = raw_image[:, :4]  # Y0, Y1, Y2, Y3 채널 [B, 4, H, W]
+    y = F.pixel_shuffle(y_channels, 2)  # [B, 1, H*2, W*2]
+    
+    # UV 채널 추출
+    uv = raw_image[:, 4:6]  # UV 채널 [B, 2, H, W]
+    
+    # Y 채널을 target_height x target_width로 다운샘플링
+    y = F.interpolate(
+        y, 
+        size=(target_height, target_width), 
+        mode='bilinear', 
+        align_corners=True,
+        antialias=False
+    )
+    
+    # UV 채널을 target_height/2 x target_width/2로 다운샘플링
+    uv = F.interpolate(
+        uv, 
+        size=(target_height//2, target_width//2), 
+        mode='bilinear', 
+        align_corners=True,
+        antialias=False
+    )
+    
+    # UV 채널을 Y 채널과 같은 크기로 업샘플링
+    uv = F.interpolate(
+        uv, 
+        size=(target_height, target_width), 
+        mode='nearest'
+    )
+    
+    # YUV 채널 결합
+    yuv_image = torch.cat([y, uv], dim=1)  # [B, 3, target_height, target_width]
+    
+    # cv2를 사용하여 YUV를 RGB로 변환
+    rgb_image = yuv_to_rgb_cv2(yuv_image)
+    
+    return rgb_image
 
 class MultiFrameRawDataset(Dataset):
     """
@@ -162,22 +248,22 @@ class MultiFrameRawDataset(Dataset):
         frame2 = multi_frames[frame_idx2]
         
         # Convert to torch tensors and normalize to [0, 1]
-        frame1 = torch.from_numpy(frame1.astype(np.float32) / 4095.0)
-        frame2 = torch.from_numpy(frame2.astype(np.float32) / 4095.0)
+        # frame1 = torch.from_numpy(frame1.astype(np.float32) / 4095.0)
+        
+        frame1 = torch.from_numpy(frame1.astype(np.float32) / 255.0)
+        frame2 = torch.from_numpy(frame2.astype(np.float32) / 255.0)
         
         # pre-gamma 보정 적용 (어두운 이미지를 더 밝게 변환)
-        if self.apply_pregamma:
-            # I' = I^(1/gamma), gamma > 1이면 어두운 영역이 더 밝아짐
-            frame1 = torch.pow(frame1, 1.0 / self.pregamma_value)
-            frame2 = torch.pow(frame2, 1.0 / self.pregamma_value)
+        # if self.apply_pregamma:
+        #     # I' = I^(1/gamma), gamma > 1이면 어두운 영역이 더 밝아짐
+        #     frame1 = torch.pow(frame1, 1.0 / self.pregamma_value)
+        #     frame2 = torch.pow(frame2, 1.0 / self.pregamma_value)
         
-        # add channel dimension
-        frame1 = frame1.unsqueeze(0)
-        frame2 = frame2.unsqueeze(0)
-        
+        # add channel dimension        
         frames = torch.stack([frame1, frame2], dim=0)
-
-        frames = preprocess_raw_bayer(frames, self.target_height, self.target_width)
+        frames = frames.permute(0, 3, 1, 2)
+        # frames = preprocess_raw_bayer(frames, self.target_height, self.target_width)
+        frames = preprocess_raw_yuv(frames, self.target_height, self.target_width)
 
         [frame1, frame2] = frames
         
@@ -348,7 +434,7 @@ if __name__ == "__main__":
     # 데이터 소스 확인
     if args.data_dir is None and args.file_list is None:
         # 기본값 설정
-        args.data_dir = "C:\\Users\\under\\Documents\\output_arrays"
+        args.data_dir = "C:\\Users\\under\\Documents\\output_yuv"
         print(f"데이터 소스가 지정되지 않아 기본 디렉토리를 사용합니다: {args.data_dir}")
     
     # 일반 데이터로더 테스트
